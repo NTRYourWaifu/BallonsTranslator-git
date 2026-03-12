@@ -50,7 +50,7 @@
 
 ```bash
 # 安裝 Python <= 3.12 與 Git
-git clone https://github.com/NTRYourWaifu/BallonsTranslator-.git
+git clone https://github.com/NTRYourWaifu/BallonsTranslator-git.git
 cd BallonsTranslator-
 python launch.py
 ```
