@@ -554,6 +554,21 @@ QCheckBox#GlobalSearchChecker::indicator:checked
     image: url(icons/search_activate.svg);
 }
 
+QCheckBox#BatchQueueChecker::indicator{
+    height: 37px;
+    width: 37px;
+    image: url(icons/batch_queue.svg);
+}
+
+QCheckBox#BatchQueueChecker::indicator:hover
+{
+    image: url(icons/batch_queue_activate.svg);
+}
+QCheckBox#BatchQueueChecker::indicator:checked
+{
+    image: url(icons/batch_queue_activate.svg);
+}
+
 
 StateChecker#ImgTransChecker::indicator{
     height: 37px;

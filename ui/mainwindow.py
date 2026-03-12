@@ -29,6 +29,7 @@ from .mainwindowbars import TitleBar, LeftBar, BottomBar
 from .io_thread import ImgSaveThread, ImportDocThread, ExportDocThread
 from .custom_widget import Widget, ViewWidget
 from .global_search_widget import GlobalSearchWidget
+from .batch_queue_panel import BatchQueuePanel
 from .textedit_commands import GlobalRepalceAllCommand
 from .framelesswindow import FramelessWindow
 from .drawing_commands import RunBlkTransCommand
@@ -81,6 +82,9 @@ class MainWindow(mainwindow_cls):
         self.app = app
         self.backup_blkstyles = []
         self._run_imgtrans_wo_textstyle_update = False
+        self._gui_batch_dirs = []
+        self._gui_batch_current = None
+        self._gui_batch_running = False
 
         self.setupThread()
         self.setupUi()
@@ -154,6 +158,12 @@ class MainWindow(mainwindow_cls):
         self.imsave_thread.img_writed.connect(self.global_search_widget.on_img_writed)
         self.global_search_widget.search_tree.result_item_clicked.connect(self.on_search_result_item_clicked)
         self.leftStackWidget.addWidget(self.global_search_widget)
+
+        self.batchQueuePanel = BatchQueuePanel(self.leftStackWidget)
+        self.batchQueuePanel.run_batch.connect(self.on_run_batch_gui)
+        self.batchQueuePanel.open_folder.connect(self.openDir)
+        self.leftStackWidget.addWidget(self.batchQueuePanel)
+        self.leftBar.batchQueueChecker.clicked.connect(self.on_set_batch_queue_widget)
         
         self.centralStackWidget = QStackedWidget(self)
         
@@ -179,6 +189,7 @@ class MainWindow(mainwindow_cls):
         self.canvas.textstack_changed.connect(self.on_textstack_changed)
         self.canvas.run_blktrans.connect(self.on_run_blktrans)
         self.canvas.drop_open_folder.connect(self.dropOpenDir)
+        self.canvas.drop_open_folders.connect(self.dropOpenDirs)
         self.canvas.originallayer_trans_slider = self.bottomBar.originalSlider
         self.canvas.textlayer_trans_slider = self.bottomBar.textlayerSlider
         self.canvas.copy_src_signal.connect(self.on_copy_src)
@@ -272,7 +283,7 @@ class MainWindow(mainwindow_cls):
         module_manager.finish_translate_page.connect(self.finishTranslatePage)
         module_manager.imgtrans_pipeline_finished.connect(self.on_imgtrans_pipeline_finished)
         module_manager.page_trans_finished.connect(self.on_pagtrans_finished)
-        module_manager.setupThread(self.configPanel, self.imgtrans_progress_msgbox, self.ocr_postprocess, self.translate_postprocess, ocr_stats_bar=self.bottomBar.ocr_stats_bar)
+        module_manager.setupThread(self.configPanel, self.imgtrans_progress_msgbox, self.ocr_postprocess, self.translate_postprocess, ocr_stats_bar=self.bottomBar.ocr_stats_bar, ocr_event_callback=self._on_batch_ocr_event)
         module_manager.progress_msgbox.showed.connect(self.on_imgtrans_progressbox_showed)
         module_manager.imgtrans_thread.mask_postprocess = self.drawingPanel.rectPanel.post_process_mask
         module_manager.blktrans_pipeline_finished.connect(self.on_blktrans_finished)
@@ -386,6 +397,17 @@ class MainWindow(mainwindow_cls):
             self.leftBar.updateRecentProjList(directory)
             self.OpenProj(directory)
 
+    def dropOpenDirs(self, dirs: list):
+        """拖入多個資料夾時，自動匯入佇列並展開佇列面板"""
+        valid = [d for d in dirs if osp.isdir(d)]
+        if not valid:
+            return
+        self.batchQueuePanel.addFolders(valid)
+        # 自動展開佇列面板
+        self.leftBar.batchQueueChecker.setChecked(True)
+        self.on_set_batch_queue_widget()
+        LOGGER.info(f'拖入 {len(valid)} 個資料夾到批量佇列')
+
     def openJsonProj(self, json_path: str):
         try:
             self.opening_dir = True
@@ -420,6 +442,8 @@ class MainWindow(mainwindow_cls):
                 self.leftStackWidget.show()
             if self.leftBar.globalSearchChecker.isChecked():
                 self.leftBar.globalSearchChecker.setChecked(False)
+            if self.leftBar.batchQueueChecker.isChecked():
+                self.leftBar.batchQueueChecker.setChecked(False)
             self.leftStackWidget.setCurrentWidget(self.pageList)
         else:
             self.leftStackWidget.hide()
@@ -919,6 +943,17 @@ class MainWindow(mainwindow_cls):
             self.module_manager.unload_all_models()
         if shared.HEADLESS:
             self.run_next_dir()
+        elif self._gui_batch_running:
+            # GUI 批量模式：根據 OCR 統計判定完成 or 異常
+            # 出現 Grok 備援（粉◆）或 OCR 失敗（紅✕）→ 異常
+            if self._gui_batch_current:
+                stats = self.batchQueuePanel.getOcrStats(self._gui_batch_current)
+                has_anomaly = stats.get('grok_ok', 0) > 0 or stats.get('error', 0) > 0
+                if has_anomaly:
+                    self.batchQueuePanel.markError(self._gui_batch_current)
+                else:
+                    self.batchQueuePanel.markDone(self._gui_batch_current)
+            self._run_next_gui_batch()
 
     def postprocess_translations(self, blk_list: List[TextBlock]) -> None:
         src_is_cjk = is_cjk(pcfg.module.translate_source)
@@ -1218,9 +1253,55 @@ class MainWindow(mainwindow_cls):
             if self.leftStackWidget.isHidden():
                 self.leftStackWidget.show()
             self.leftBar.showPageListLabel.setChecked(False)
+            self.leftBar.batchQueueChecker.setChecked(False)
             self.leftStackWidget.setCurrentWidget(self.global_search_widget)
         else:
             self.leftStackWidget.hide()
+
+    def on_set_batch_queue_widget(self):
+        setup = self.leftBar.batchQueueChecker.isChecked()
+        if setup:
+            if self.leftStackWidget.isHidden():
+                self.leftStackWidget.show()
+            self.leftBar.showPageListLabel.setChecked(False)
+            self.leftBar.globalSearchChecker.setChecked(False)
+            self.leftStackWidget.setCurrentWidget(self.batchQueuePanel)
+        else:
+            self.leftStackWidget.hide()
+
+    def on_run_batch_gui(self, dirs: list):
+        """從批量佇列面板觸發的 GUI 批量執行"""
+        valid_dirs = [d for d in dirs if osp.exists(d)]
+        if not valid_dirs:
+            LOGGER.warning('批量佇列中沒有有效的資料夾')
+            return
+        self._gui_batch_dirs = list(valid_dirs)
+        self._gui_batch_running = True
+        self.batchQueuePanel.setRunning(True)
+        LOGGER.info(f'開始 GUI 批量翻譯，共 {len(valid_dirs)} 個資料夾')
+        self._run_next_gui_batch()
+
+    def _run_next_gui_batch(self):
+        """依序處理 GUI 批量佇列中的下一個資料夾"""
+        if not self._gui_batch_dirs:
+            # 全部完成
+            self._gui_batch_running = False
+            self._gui_batch_current = None
+            self.batchQueuePanel.setRunning(False)
+            LOGGER.info('批量翻譯全部完成！')
+            return
+
+        d = self._gui_batch_dirs.pop(0)
+        self._gui_batch_current = d
+        self.batchQueuePanel.markRunning(d)
+        LOGGER.info(f'批量翻譯：{d} （剩餘 {len(self._gui_batch_dirs)} 個）')
+        self.openDir(d)
+        self.run_imgtrans()
+
+    def _on_batch_ocr_event(self, event_type: str):
+        """轉發 OCR 事件到佇列面板的當前資料夾"""
+        if self._gui_batch_running and self._gui_batch_current:
+            self.batchQueuePanel.updateOcrStats(self._gui_batch_current, event_type)
 
     def on_fin_export_doc(self):
         msg = QMessageBox()

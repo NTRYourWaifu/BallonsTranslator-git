@@ -46,6 +46,12 @@ _SVG_RESUME_LAST = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg
   <polygon points="17,4 22,9 12,9" fill="#cccccc"/>
 </svg>'''
 
+_SVG_BATCH_QUEUE = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <rect x="3" y="3" width="14" height="10" rx="1.5" fill="none" stroke="#cccccc" stroke-width="1.8"/>
+  <rect x="5" y="7" width="14" height="10" rx="1.5" fill="none" stroke="#cccccc" stroke-width="1.8"/>
+  <rect x="7" y="11" width="14" height="10" rx="1.5" fill="none" stroke="#cccccc" stroke-width="1.8"/>
+</svg>'''
+
 
 if C.FLAG_QT6:
     from qtpy.QtGui import QAction
@@ -170,6 +176,10 @@ class LeftBar(Widget):
         self.imgTransChecker = StateChecker('imgtrans')
         self.imgTransChecker.setObjectName('ImgTransChecker')
         self.imgTransChecker.checked.connect(self.stateCheckerChanged)
+
+        self.batchQueueChecker = QCheckBox()
+        self.batchQueueChecker.setObjectName('BatchQueueChecker')
+        self.batchQueueChecker.setToolTip(self.tr('批量翻譯佇列'))
         
         self.configChecker = StateChecker('config', uncheckable=True)
         self.configChecker.setObjectName('ConfigChecker')
@@ -250,6 +260,7 @@ class LeftBar(Widget):
         vlayout.addWidget(self.showPageListLabel)
         vlayout.addWidget(self.globalSearchChecker)
         vlayout.addWidget(self.imgTransChecker)
+        vlayout.addWidget(self.batchQueueChecker)
         vlayout.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
         vlayout.addWidget(self.stopBtn)
         vlayout.addWidget(self.resumeHereBtn)
@@ -360,7 +371,7 @@ class LeftBar(Widget):
                 
 
     def needleftStackWidget(self) -> bool:
-        return self.showPageListLabel.isChecked() or self.globalSearchChecker.isChecked()
+        return self.showPageListLabel.isChecked() or self.globalSearchChecker.isChecked() or self.batchQueueChecker.isChecked()
 
 
 class TitleBar(Widget):

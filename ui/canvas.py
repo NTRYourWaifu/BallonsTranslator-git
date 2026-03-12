@@ -190,6 +190,7 @@ class Canvas(QGraphicsScene):
     proj_savestate_changed = Signal(bool)
     textstack_changed = Signal()
     drop_open_folder = Signal(str)
+    drop_open_folders = Signal(list)    # 拖入多個資料夾時發射
     context_menu_requested = Signal(QPoint, bool)
     incanvas_selection_changed = Signal()
     switch_text_item = Signal(int, QKeyEvent)
@@ -306,23 +307,25 @@ class Canvas(QGraphicsScene):
 
     def dragEnterEvent(self, e: QGraphicsSceneDragDropEvent):
         
-        self.drop_folder = None
+        self.drop_folders = []
         if e.mimeData().hasUrls():
             urls = e.mimeData().urls()
-            ufolder = None
             for url in urls:
                 furl = url.toLocalFile()
                 if os.path.isdir(furl):
-                    ufolder = furl
-                    break
-            if ufolder is not None:
+                    self.drop_folders.append(furl)
+            if self.drop_folders:
                 e.acceptProposedAction()
-                self.drop_folder = ufolder
 
     def dropEvent(self, event) -> None:
-        if self.drop_folder is not None:
-            self.drop_open_folder.emit(self.drop_folder)
-            self.drop_folder = None
+        if self.drop_folders:
+            if len(self.drop_folders) == 1:
+                # 單個資料夾：跟以前一樣直接打開
+                self.drop_open_folder.emit(self.drop_folders[0])
+            else:
+                # 多個資料夾：送佇列
+                self.drop_open_folders.emit(self.drop_folders)
+            self.drop_folders = []
         return super().dropEvent(event)
 
     def textEditMode(self) -> bool:

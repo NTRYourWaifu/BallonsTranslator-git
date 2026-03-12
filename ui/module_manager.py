@@ -638,13 +638,14 @@ class ModuleManager(QObject):
         self.check_inpaint_fin_timer = QTimer(self)
         self.check_inpaint_fin_timer.timeout.connect(self.check_inpaint_th_finished)
 
-    def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_postprocess: Callable = None, ocr_stats_bar=None):
+    def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_postprocess: Callable = None, ocr_stats_bar=None, ocr_event_callback=None):
         self.textdetect_thread = TextDetectThread()
         self.textdetect_thread.finish_set_module.connect(self.on_finish_setdetector)
 
         self.ocr_thread = OCRThread()
         self.ocr_thread.finish_set_module.connect(self.on_finish_setocr)
         self.ocr_stats_bar = ocr_stats_bar
+        self.ocr_event_callback = ocr_event_callback
 
         self.translate_thread = TranslateThread()
         self.translate_thread.progress_changed.connect(self.on_update_translate_progress)
@@ -976,6 +977,8 @@ class ModuleManager(QObject):
             # 綁定 stats_signals（每次換 OCR 模組都重新綁）
             if self.ocr_stats_bar is not None and hasattr(self.ocr, 'stats_signals'):
                 self.ocr.stats_signals.event.connect(self.ocr_stats_bar._on_event)
+            if self.ocr_event_callback is not None and hasattr(self.ocr, 'stats_signals'):
+                self.ocr.stats_signals.event.connect(self.ocr_event_callback)
 
     def on_finish_setinpainter(self):
         if self.inpainter is not None:
