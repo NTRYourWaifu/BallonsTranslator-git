@@ -1,0 +1,50 @@
+# === 敏感設定（含 API Key）===
+config/config.json
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === 虛擬環境 ===
+venv/
+.venv/
+env/
+
+# === 模型與大型資料 ===
+data/models/
+data/libs/
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# === 本地快取 ===
+.btrans_cache/
+*.log
+logs/
+
+# === 打包產物 ===
+ballontrans_pylibs_win/
+PortableGit/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === 其他 ===
+tmp/
+提示詞.txt
+提示詞v2.txt
