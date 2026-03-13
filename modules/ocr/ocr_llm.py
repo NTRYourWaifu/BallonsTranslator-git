@@ -210,6 +210,7 @@ class OCRLlm(OCRBase):
     # ── 圖片工具 ──────────────────────────────────────────────
     def _make_masked_img(self, img: np.ndarray,
                           blk_list: List[TextBlock]) -> np.ndarray:
+        """黑圖只保留合併後的文字框區域（Plan B 用）。"""
         mask = np.zeros(img.shape[:2], dtype=np.uint8)
         for blk in blk_list:
             x1, y1, x2, y2 = blk.xyxy
@@ -293,6 +294,10 @@ class OCRLlm(OCRBase):
                 gx2 = int(xmax * img_w / 1000)
                 gy2 = int(ymax * img_h / 1000)
 
+                # LLM 回傳方向：'v'→直排，'h'→橫排，缺省→None（保留原框方向）
+                llm_dir = item.get('direction', '').lower()
+                is_vertical = True if llm_dir == 'v' else (False if llm_dir == 'h' else None)
+
                 overlapping = [
                     blk for blk in blk_list
                     if id(blk) not in used_ids
@@ -300,14 +305,30 @@ class OCRLlm(OCRBase):
                     and (gy1-30) <= (blk.xyxy[1]+blk.xyxy[3])/2 <= (gy2+30)
                 ]
                 if overlapping:
+                    # 有對應既有框 → 選最大的，套用 LLM 方向
                     main = max(overlapping,
                                key=lambda b: (b.xyxy[2]-b.xyxy[0])*(b.xyxy[3]-b.xyxy[1]))
                     main.text = [item['original']]
                     main.translation = item.get('translation', '')
+                    if is_vertical is not None:
+                        main.vertical = is_vertical
                     self._apply_font_size(main, item['original'])
                     valid_blks.append(main)
                     for b in overlapping:
                         used_ids.add(id(b))
+                else:
+                    # LLM 新增框（藝術字補漏）→ 動態建立 TextBlock
+                    if gx2 > gx1 and gy2 > gy1:
+                        bw, bh = gx2 - gx1, gy2 - gy1
+                        lines = [[[gx1, gy1], [gx2, gy1], [gx2, gy2], [gx1, gy2]]]
+                        # 優先用 LLM 給的方向，缺省才 fallback 長寬比
+                        vert = is_vertical if is_vertical is not None else (bh > bw)
+                        new_blk = TextBlock(xyxy=[gx1, gy1, gx2, gy2], lines=lines,
+                                            vertical=vert)
+                        new_blk.text = [item['original']]
+                        new_blk.translation = item.get('translation', '')
+                        self._apply_font_size(new_blk, item['original'])
+                        valid_blks.append(new_blk)
 
             if valid_blks:
                 blk_list.clear()
@@ -322,10 +343,12 @@ class OCRLlm(OCRBase):
     _PAGE_PROMPT = (
         "Detect all text bubbles in this manga page. "
         "Extract original Japanese and translate to Traditional Chinese. "
-        "Output ONLY valid JSON: "
+        "Output ONLY valid JSON array: "
         "[{\"box_2d\": [ymin, xmin, ymax, xmax], "
+        "\"direction\": \"v\" or \"h\", "
         "\"original\": \"...\", \"translation\": \"...\"}]. "
-        "Coordinates must be normalized (0-1000)."
+        "direction: \"v\" for vertical text (tategumi), \"h\" for horizontal (yokogumi). "
+        "Coordinates normalized 0-1000."
     )
 
     def _run_fullpage(self, img: np.ndarray, blk_list: List[TextBlock]) -> str:
@@ -458,7 +481,7 @@ class OCRLlm(OCRBase):
         # Plan C：切片（含切片層級的 Grok 備援）
         if self.enable_slice_plan:
             self._run_slice_plan(img, blk_list, lp)
-            return  # 切片完成，不論成敗都結束（失敗框已保留、已計error）
+            return  # 切片完成，不論成敗都結束
 
         # Plan D：Grok 全頁備援（僅切片停用時）
         if self.fallback_api_key:
