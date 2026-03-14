@@ -39,6 +39,11 @@ class DetectorYOLOv8(TextDetectorBase):
             'value': True,
             'description': '強制所有框視為直排（日文漫畫建議勾選，預設開啟）'
         },
+        'debug_log': {
+            'type': 'checkbox',
+            'value': False,
+            'description': '輸出 det box debug log'
+        },
     }
 
     def __init__(self, **kwargs):
@@ -81,6 +86,13 @@ class DetectorYOLOv8(TextDetectorBase):
             return val != 0
         if isinstance(val, str):
             return val.strip().lower() == 'true'
+        return bool(val)
+
+    @property
+    def debug_log(self) -> bool:
+        val = self.params['debug_log']['value']
+        if isinstance(val, bool):
+            return val
         return bool(val)
 
     def setup_detector(self):
@@ -225,7 +237,10 @@ class DetectorYOLOv8(TextDetectorBase):
             # orig_w = 合併前最窄框寬 ≈ 單欄寬 ≈ 字寬（最準確來源）
             # 若沒有合併發生，orig_w == box_w，OCR 側改用字數數學推算
             blk._detected_font_size = float(orig_w)
-            self.logger.debug(f"det box=({x1},{y1},{x2},{y2}) merged_w={x2-x1} orig_w={orig_w}")
+            
+            if self.debug_log:
+                self.logger.debug(f"det box=({x1},{y1},{x2},{y2}) merged_w={x2-x1} orig_w={orig_w}")
+                
             blk_list.append(blk)
 
         mask = np.zeros(img.shape[:2], dtype=np.uint8)

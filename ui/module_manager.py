@@ -408,6 +408,7 @@ class ImgtransThread(QThread):
             if cfg_module.enable_ocr:
                 try:
                     self.ocr.current_imgname = imgname
+                    self.ocr.current_img_dir = self.imgtrans_proj.directory
                     self.ocr.run_ocr(img, blk_list)
                 except Exception as e:
                     create_error_dialog(e, self.tr('OCR Failed.'), 'OCRFailed')

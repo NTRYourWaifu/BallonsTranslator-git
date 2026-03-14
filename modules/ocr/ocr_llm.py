@@ -1,3 +1,4 @@
+import os
 import math
 import numpy as np
 import cv2
@@ -17,8 +18,8 @@ from .base import register_OCR, OCRBase, TextBlock
 # ── 統計事件類型 ──────────────────────────────────────────────
 class OcrEventType:
     PLAN_A_OK  = 'plan_a_ok'   # 綠  原圖全頁成功
-    PLAN_A2_OK = 'plan_a2_ok'  # 黃  黑圖全頁成功
-    SLICE_OK   = 'slice_ok'    # 橘  切片（主API）成功
+    FONT_WARN  = 'plan_a2_ok'  # 黃  [借用舊版信號] 字型異常警告 (過大或過小)
+    SLICE_OK   = 'slice_ok'    # 橘  Plan B 切片（主API）成功
     GROK_OK    = 'grok_ok'     # 粉  Grok 成功（切片或全頁）
     ERROR      = 'error'       # 紅  最終放棄此頁
 
@@ -114,15 +115,15 @@ class OCRLlm(OCRBase):
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_ratio': {'value': '0.8', 'description': '字體大小係數（0.5~1.2）'},
+        'debug_log': {'type': 'checkbox', 'value': False,
+                      'description': '輸出 font_size debug log'},
         'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
         'fallback_model':   {'value': 'grok-4.20-beta-0309-non-reasoning',
                              'description': '備援模型，需支援 vision'},
-        'use_fallback_only':  {'type': 'checkbox', 'value': False,
-                               'description': '全部走備援 API'},
-        'enable_masked_plan': {'type': 'checkbox', 'value': True,
-                               'description': 'Plan B：原圖被擋後送塗黑版'},
-        'enable_slice_plan':  {'type': 'checkbox', 'value': True,
-                               'description': 'Plan C：B 被擋後切片逐框，被擋送 Plan D Grok'},
+        'disable_plan_a': {'type': 'checkbox', 'value': False,
+                           'description': '測試用：停用 Plan A（強制跳到 Plan B）'},
+        'disable_plan_b': {'type': 'checkbox', 'value': False,
+                           'description': '測試用：停用 Plan B（強制跳到 Plan C）'},
     }
 
     def __init__(self, **params) -> None:
@@ -131,18 +132,18 @@ class OCRLlm(OCRBase):
         self.last_request_time = 0
         self.page_counter = 0
         self.current_imgname = ''
+        self.current_img_dir = ''
         self.stats_signals = OcrStatsSignals()
         self._build_client()
 
     def _fmt_imgname(self, name: str) -> str:
-        """超過9字元縮寫：前3字元 + ... + 後3字元（不含副檔名部分補上副檔名）
-        例：01_37639451_p0.webp → 01_...p0.webp"""
+        """超過9字元縮寫：前3字元 + ... + 後3字元（不含副檔名部分補上副檔名）"""
         if len(name) <= 9:
             return name
         ext_idx = name.rfind('.')
-        ext = name[ext_idx:] if ext_idx != -1 else ''          # .webp
-        stem = name[:ext_idx] if ext_idx != -1 else name       # 01_37639451_p0
-        return f'{stem[:3]}...{stem[-3:]}{ext}'                 # 01_...p0.webp
+        ext = name[ext_idx:] if ext_idx != -1 else ''
+        stem = name[:ext_idx] if ext_idx != -1 else name
+        return f'{stem[:3]}...{stem[-3:]}{ext}'
 
     # ── properties ───────────────────────────────────────────
     @property
@@ -166,15 +167,15 @@ class OCRLlm(OCRBase):
         try: return float(self.params['font_size_ratio']['value'])
         except: return 0.8
     @property
+    def debug_log(self) -> bool: return bool(self.params['debug_log']['value'])
+    @property
     def fallback_api_key(self) -> str:  return self.params['fallback_api_key']['value']
     @property
     def fallback_model(self) -> str:    return self.params['fallback_model']['value']
     @property
-    def use_fallback_only(self) -> bool:   return bool(self.params['use_fallback_only']['value'])
+    def disable_plan_a(self) -> bool:   return bool(self.params['disable_plan_a']['value'])
     @property
-    def enable_masked_plan(self) -> bool:  return bool(self.params['enable_masked_plan']['value'])
-    @property
-    def enable_slice_plan(self) -> bool:   return bool(self.params['enable_slice_plan']['value'])
+    def disable_plan_b(self) -> bool:   return bool(self.params['disable_plan_b']['value'])
 
     # ── 統計事件 ──────────────────────────────────────────────
     def _emit(self, event_type: str):
@@ -203,60 +204,59 @@ class OCRLlm(OCRBase):
             time.sleep(self.delay - elapsed)
         self.last_request_time = time.time()
 
-    # ── 圖片工具 ──────────────────────────────────────────────
-    def _make_masked_img(self, img: np.ndarray,
-                          blk_list: List[TextBlock]) -> np.ndarray:
-        """黑圖只保留合併後的文字框區域（Plan B 用）。"""
-        mask = np.zeros(img.shape[:2], dtype=np.uint8)
-        for blk in blk_list:
-            x1, y1, x2, y2 = blk.xyxy
-            mask[y1:y2, x1:x2] = 255
-        return cv2.bitwise_and(img, img, mask=mask)
-
     # ── 字體大小 ──────────────────────────────────────────────
     def _auto_font_size(self, blk: TextBlock, text: str = '') -> float:
         x1, y1, x2, y2 = blk.xyxy
         box_w = max(x2 - x1, 1)
         box_h = max(y2 - y1, 1)
-        orig_w = blk._detected_font_size  # detector 存入的合併前最窄寬度
+        orig_w = getattr(blk, '_detected_font_size', 0)
 
-        # 情境 A：orig_w 明顯小於 box_w → 代表有合併發生
-        # orig_w ≈ 單欄寬 ≈ 字寬，最準確，直接用
+        # 【渲染上限】：保留最大到 250.0，讓標題字可以正常放大繪製，不被壓扁
         if 0 < orig_w < box_w * 0.8:
-            return max(8.0, min(72.0, orig_w * self.font_size_ratio))
+            return max(8.0, min(250.0, orig_w * self.font_size_ratio))
 
-        # 情境 B：orig_w ≈ box_w → 沒有合併，YOLO 直接掃出整塊大框
-        # 改用「字數 + 面積數學推算」算出整數欄數，再得出字寬
         if text:
             clean_text = re.sub(r'\s+', '', text)
             N = max(len(clean_text), 1)
-            S_est = math.sqrt((box_w * box_h) / N)  # 理論字體大小（正方形假設）
+            S_est = math.sqrt((box_w * box_h) / N)
             if blk.vertical:
                 estimated_cols = max(1, round(box_w / S_est))
                 final_fs = box_w / estimated_cols
             else:
                 estimated_rows = max(1, round(box_h / S_est))
                 final_fs = box_h / estimated_rows
-            return max(8.0, min(72.0, final_fs * self.font_size_ratio))
+            return max(8.0, min(250.0, final_fs * self.font_size_ratio))
 
-        # fallback：無文字時直接用 orig_w
-        return max(8.0, min(72.0, orig_w * self.font_size_ratio))
+        return max(8.0, min(250.0, box_w * self.font_size_ratio))
 
     def _apply_font_size(self, blk: TextBlock, text: str = ''):
-        orig_w = blk._detected_font_size
+        orig_w = getattr(blk, '_detected_font_size', 0)
         fs = self._auto_font_size(blk, text)
         x1, y1, x2, y2 = blk.xyxy
         box_w = x2 - x1
-        merged = orig_w < box_w * 0.8
-        self.logger.debug(
-            f"font_size: orig_w={orig_w:.1f} box={box_w}x{y2-y1}"
-            f" {'[merged→orig_w]' if merged else '[no merge→math]'}"
-            f" → fs={fs:.1f} | text={text[:10]!r}"
-        )
+        merged = 0 < orig_w < box_w * 0.8
+        
+        # ⚠️ 【警告門檻】：恢復嚴格的警告區間 (<12 或 >65)
+        # 如果大於 65，它依然會畫到 123 那麼大（因為渲染上限是 250）
+        # 但黃色三角形會盡責地亮起，提醒你「這個字特別大哦」。
+        # 若是標題你可以忽略；若是內文，你就知道出 Bug 了！
+        is_abnormal = fs < 12.0 or fs > 65.0
+        
+        if is_abnormal:
+            self.logger.warning(
+                f"⚠️字型異常: fs={fs:.1f} (orig_w={orig_w:.1f}, box={box_w}x{y2-y1}) | text={text[:10]!r}"
+            )
+            self._emit(OcrEventType.FONT_WARN)
+        elif self.debug_log:
+            self.logger.debug(
+                f"font_size: orig_w={orig_w:.1f} box={box_w}x{y2-y1}"
+                f" {'[merged→orig_w]' if merged else '[no merge→math]'}"
+                f" → fs={fs:.1f} | text={text[:10]!r}"
+            )
+            
         blk.font_size = fs
 
     # ── 底層 API 呼叫 ─────────────────────────────────────────
-    # ── 錯誤碼中文對照 ───────────────────────────────────────
     @staticmethod
     def _explain_error(err: str) -> str:
         if '429' in err or 'exhausted' in err.lower() or 'quota' in err.lower():
@@ -281,8 +281,6 @@ class OCRLlm(OCRBase):
 
     def _call_ocr(self, img: np.ndarray, custom_prompt: str = None) -> str:
         """回傳: 原始字串 | 'BLOCKED_BY_SAFETY' | 'ERR:原因'"""
-        if self.use_fallback_only:
-            return 'BLOCKED_BY_SAFETY'
         if self.client is None:
             return 'ERR:未設定API金鑰'
         img_b64 = _img_to_base64(img)
@@ -351,6 +349,7 @@ class OCRLlm(OCRBase):
                 if idx < 0 or idx >= len(blk_list):
                     self.logger.warning(f"orig index={idx} 超出範圍（共{len(blk_list)}框），跳過")
                     continue
+                
                 blk = blk_list[idx]
                 blk.text = [item['original']]
                 blk.translation = item.get('translation', '')
@@ -359,6 +358,7 @@ class OCRLlm(OCRBase):
                     blk.vertical = True
                 elif llm_dir == 'h':
                     blk.vertical = False
+                    
                 self._apply_font_size(blk, item['original'])
                 matched += 1
 
@@ -369,8 +369,8 @@ class OCRLlm(OCRBase):
             return False
 
     # ── 全頁模式（單次） ──────────────────────────────────────
-    _GRID_CELL = 192   # 每個格子的邊長（px）
-    _GRID_PAD  = 28    # 格子間距（px），需夠大放 index 編號
+    _GRID_CELL = 192
+    _GRID_PAD  = 28
 
     _GRID_PROMPT = (
         "This image is a grid of manga text box crops.\n"
@@ -389,14 +389,10 @@ class OCRLlm(OCRBase):
 
     def _build_grid_img(self, img: np.ndarray,
                         blk_list: List[TextBlock]) -> np.ndarray:
-        import math
         h_img, w_img = img.shape[:2]
+        label_w = max(20, int(w_img * 0.018))
+        gap = max(6, int(w_img * 0.005))
 
-        label_w = max(20, int(w_img * 0.018))  # 左側編號欄寬
-        gap = max(6, int(w_img * 0.005))        # 格子間距
-
-
-        # 裁切所有框，保持原始比例
         crops = []
         for blk in blk_list:
             bx1, by1, bx2, by2 = blk.xyxy
@@ -405,20 +401,18 @@ class OCRLlm(OCRBase):
             crop = img[py1:py2, px1:px2]
             crops.append(crop if crop.size > 0 else np.zeros((10, 10, 3), dtype=np.uint8))
 
-        # 目標寬度 = sqrt(所有格子面積總和)，盡量接近正方形
         total_area = sum((c.shape[1] + label_w) * c.shape[0] for c in crops)
         target_w = max(int(math.sqrt(total_area)), 100)
 
-        # Bin packing：框按高度由大到小排，逐行填充
         order = sorted(range(len(crops)), key=lambda i: -crops[i].shape[0])
-        rows = []       # list of list of (orig_idx, crop)
-        row_ws = []     # 每行目前總寬
-        row_hs = []     # 每行最大高
+        rows = []
+        row_ws = []
+        row_hs = []
 
         for orig_idx in order:
             crop = crops[orig_idx]
             ch, cw = crop.shape[:2]
-            fw = cw + label_w  # 含 label 的格子寬
+            fw = cw + label_w
 
             placed = False
             for r in range(len(rows)):
@@ -433,29 +427,26 @@ class OCRLlm(OCRBase):
                 row_ws.append(fw)
                 row_hs.append(ch)
 
-        # canvas 尺寸（含 label_w）
         canvas_w = max(row_ws) + gap
         canvas_h = sum(row_hs) + (len(rows) + 1) * gap
         canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
-        # 先建 visual_order（右到左、上到下），再做反查表 orig_idx → visual_idx
-        # visual_order[視覺index] = orig_idx
         visual_order = []
         for r, row in enumerate(rows):
             for orig_idx, _ in reversed(row):
                 visual_order.append(orig_idx)
         orig_to_visual = {orig_idx: vi for vi, orig_idx in enumerate(visual_order)}
 
-        # 貼圖：在 label 欄寫視覺 index，讓 LLM 有數字錨點
         font_thick = 1
         y_cursor = gap
         for r, row in enumerate(rows):
-            x_cursor = gap
+            row_actual_w = sum(label_w + crop.shape[1] for _, crop in row) + gap * (len(row) - 1)
+            x_cursor = canvas_w - gap - row_actual_w
+
             for orig_idx, crop in row:
                 ch, cw = crop.shape[:2]
                 row_h = row_hs[r]
 
-                # 黑色 label 欄 + 視覺 index 數字
                 canvas[y_cursor:y_cursor+row_h, x_cursor:x_cursor+label_w] = 0
                 vi = orig_to_visual[orig_idx]
                 label = str(vi)
@@ -466,12 +457,8 @@ class OCRLlm(OCRBase):
                 cv2.putText(canvas, label, (tx, ty),
                             cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thick, cv2.LINE_AA)
 
+                canvas[y_cursor:y_cursor+ch, x_cursor+label_w:x_cursor+label_w+cw] = crop
 
-                # 裁切圖靠左上貼
-                canvas[y_cursor:y_cursor+ch,
-                       x_cursor+label_w:x_cursor+label_w+cw] = crop
-
-                # 醒目外框：黑色描邊 + 亮黃色內框
                 cx1, cy1 = x_cursor, y_cursor
                 cx2, cy2 = x_cursor + label_w + cw, y_cursor + row_h
                 cv2.rectangle(canvas, (cx1,     cy1),     (cx2,     cy2),     (0,   0,   0), 3)
@@ -480,45 +467,37 @@ class OCRLlm(OCRBase):
                 x_cursor += label_w + cw + gap
             y_cursor += row_hs[r] + gap
 
-
-         # DEBUG：存到原圖目錄下的 ocr_debug 資料夾
-        import os
-        
-        # 取得原圖的資料夾路徑與檔名
-        img_dir = os.path.dirname(self.current_imgname)
+        img_dir = self.current_img_dir or os.path.dirname(self.current_imgname) or '.'
         img_name = os.path.basename(self.current_imgname) or 'unknown'
         
-        # 若無路徑資訊 (防呆)，則預設使用當前目錄
-        if not img_dir:
-            img_dir = '.'
-            
-        # 建立專屬的 ocr_debug 資料夾 (exist_ok=True 代表資料夾已存在也不會報錯)
         debug_dir = os.path.join(img_dir, 'ocr_debug')
         os.makedirs(debug_dir, exist_ok=True)
         
-        # 抽換副檔名，確保 Debug 圖統一存成 .jpg 格式 (避免原圖是 cv2 不支援寫入的格式)
         file_stem = os.path.splitext(img_name)[0]
         safe_name = f"{file_stem}_grid.jpg"
-        
-        # 組合最終路徑並存檔
         debug_path = os.path.join(debug_dir, safe_name)
+        
         cv2.imwrite(debug_path, canvas)
+        self.logger.info(f"[{img_name}] 已產生 Debug 網格圖: {os.path.abspath(debug_path)}")
 
         return canvas, visual_order
 
-    def _run_fullpage(self, img: np.ndarray, blk_list: List[TextBlock]) -> str:
+    def _run_fullpage(self, img: np.ndarray, blk_list: List[TextBlock]):
+        if self.disable_plan_a:
+            return 'SKIP:disabled', 0
         grid_img, visual_order = self._build_grid_img(img, blk_list)
         prompt = self._GRID_PROMPT.replace('{n}', str(len(blk_list)))
         resp = self._call_ocr(grid_img, custom_prompt=prompt)
         if resp == 'BLOCKED_BY_SAFETY':
-            return '安全過濾器擋住'
+            return '安全過濾器擋住', 0
         if resp.startswith('ERR:'):
-            return resp[4:]
+            return resp[4:], 0
         if not resp:
-            return 'API無回應'
-        if self._parse_fullpage_result(resp, blk_list, visual_order):
-            return 'ok'
-        return 'JSON解析失敗'
+            return 'API無回應', 0
+        matched = self._parse_fullpage_result(resp, blk_list, visual_order)
+        if matched:
+            return 'ok', matched
+        return 'JSON解析失敗', 0
 
     # ── 切片模式 ──────────────────────────────────────────────
     _SLICE_PROMPT = (
@@ -539,7 +518,6 @@ class OCRLlm(OCRBase):
                 self.logger.error(f"{log_prefix} 切片 {idx+1} 失敗: {resp or '?'}")
                 self._emit(OcrEventType.ERROR)
                 return idx, None
-            used_grok = True
             used_grok = True
 
         if not resp:
@@ -568,6 +546,8 @@ class OCRLlm(OCRBase):
 
     def _run_slice_plan(self, img: np.ndarray, blk_list: List[TextBlock],
                          log_prefix: str):
+        if self.disable_plan_b:
+            return 'SKIP:disabled', 0, len(blk_list), list(range(len(blk_list)))
         h, w = img.shape[:2]
         pad = 12
         tasks = []
@@ -589,26 +569,23 @@ class OCRLlm(OCRBase):
                 idx, rb = f.result()
                 results_map[idx] = rb
 
-        # 以原始 blk_list 為基準，逐一決定結果
         final = []
         task_indices = {t[0] for t in tasks}
         for i, blk in enumerate(blk_list):
             if i not in task_indices:
-                # 座標無效，保留原框填 ●●●
-                blk.text = ['●●●']
-                blk.translation = '●●●'
                 final.append(blk)
             elif results_map.get(i) is not None:
-                # OCR 成功
                 final.append(results_map[i])
             else:
-                # OCR 失敗，保留原框填 ●●●
-                blk.text = ['●●●']
-                blk.translation = '●●●'
                 final.append(blk)
+
+        ok_count = sum(1 for i in range(len(blk_list)) if results_map.get(i) is not None)
+        fail_count = len(blk_list) - ok_count
+        failed_indices = [i for i in range(len(blk_list)) if results_map.get(i) is None]
 
         blk_list.clear()
         blk_list.extend(final)
+        return 'ok', ok_count, fail_count, failed_indices
 
     # ── 閱讀順序排序（日漫：右→左欄，欄內上→下）────────────
     def _sort_blk_reading_order(self, blk_list: List[TextBlock]) -> List[TextBlock]:
@@ -619,13 +596,10 @@ class OCRLlm(OCRBase):
         def cy(b): return (b.xyxy[1] + b.xyxy[3]) / 2
 
         img_h_approx = max(b.xyxy[3] for b in blk_list)
-
-        # 欄寬門檻：用框寬中位數，但至少是圖片高度的 3%
         widths = sorted([(b.xyxy[2] - b.xyxy[0]) for b in blk_list])
         median_w = widths[len(widths) // 2]
         col_thresh = max(median_w * 0.75, img_h_approx * 0.03)
 
-        # 貪婪分欄：x 中心點相近的框歸同一欄
         cols = []
         for blk in sorted(blk_list, key=cx, reverse=True):
             placed = False
@@ -638,9 +612,6 @@ class OCRLlm(OCRBase):
             if not placed:
                 cols.append([blk])
 
-
-
-        # 欄內按 y 排序後，若相鄰兩框 y 距離超過圖片高度 20%，視為跨區塊，強制拆欄
         gap_thresh = img_h_approx * 0.20
         split_cols = []
         for col in cols:
@@ -654,13 +625,8 @@ class OCRLlm(OCRBase):
                     current.append(blk)
             split_cols.append(current)
 
-
-
-        # 拆欄後：先按欄的 y 中心分群（區塊），再各區塊內按 cx 由右到左排
-        # 用圖片高度的 20% 當區塊分界門檻（同 gap_thresh）
         split_cols.sort(key=lambda col: sum(cy(b) for b in col) / len(col))
 
-        # 把 cy 相近的欄歸到同一「區塊」
         blocks = []
         current_block = [split_cols[0]]
         for col in split_cols[1:]:
@@ -673,13 +639,9 @@ class OCRLlm(OCRBase):
                 current_block.append(col)
         blocks.append(current_block)
 
-
-
-        # 每個區塊內按 cx 由右到左排
         result = []
         for bi, block in enumerate(blocks):
             block.sort(key=lambda col: -sum(cx(b) for b in col) / len(col))
-
             for col in block:
                 result.extend(col)
 
@@ -694,52 +656,68 @@ class OCRLlm(OCRBase):
         self.page_counter += 1
         lp = f"[{self._fmt_imgname(self.current_imgname)}]"
 
-        # 按漫畫閱讀順序排序（右→左欄，欄內上→下）
-        # 只影響傳給 LLM 的 index 對應，不改變框本身
         sorted_blks = self._sort_blk_reading_order(blk_list)
 
-
         # Plan A：原圖全頁
-        result = self._run_fullpage(img, sorted_blks)
+        result, matched = self._run_fullpage(img, sorted_blks)
         if result == 'ok':
             self._emit(OcrEventType.PLAN_A_OK)
-            self.logger.success(f"{lp} Plan A 成功")
+            self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
             return
-        self.logger.warning(f"{lp} Plan A 失敗（原因：{result}），嘗試 Plan B...")
+        self.logger.warning(f"{lp} Plan A：{result}")
 
-        # Plan B：塗黑全頁
-        if self.enable_masked_plan:
-            masked = self._make_masked_img(img, blk_list)
-            result = self._run_fullpage(masked, sorted_blks)
-            if result == 'ok':
-                self._emit(OcrEventType.PLAN_A2_OK)
-                self.logger.success(f"{lp} Plan B 成功")
+        # Plan B：切片（含切片層級的 Grok 備援）
+        result, ok, fail, failed_indices = self._run_slice_plan(img, blk_list, lp)
+        if result == 'ok':
+            total = ok + fail
+            if fail == 0:
+                self.logger.success(f"{lp} Plan B 成功（{ok}/{total} 框）")
                 return
-            self.logger.warning(f"{lp} Plan B 失敗（原因：{result}），嘗試 Plan C...")
+            else:
+                self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")
         else:
-            self.logger.warning(f"{lp} Plan B 已停用，直接進 Plan C...")
+            self.logger.warning(f"{lp} Plan B：{result}")
 
-        # Plan C：切片（含切片層級的 Grok 備援）
-        if self.enable_slice_plan:
-            self.logger.info(f"{lp} 進入 Plan C 切片模式")
-            self._run_slice_plan(img, blk_list, lp)
-            return  # 切片完成，不論成敗都結束
-
-        # Plan D：Grok 全頁備援（僅切片停用時）
-        if self.fallback_api_key:
-            self.logger.warning(f"{lp} Plan D Grok 備援...")
-            grok_img = (self._make_masked_img(img, blk_list)
-                        if self.enable_masked_plan else img)
-            h, w = grok_img.shape[:2]
-            resp = self._call_ocr_grok(grok_img, self._PAGE_PROMPT, lp)
-            if resp and self._parse_fullpage_result(resp, w, h, blk_list):
-                self._emit(OcrEventType.GROK_OK)
-                return
-            self.logger.error(f"{lp} Plan D 也失敗，此頁放棄")
-            self._emit(OcrEventType.ERROR)
-        else:
-            self.logger.error(f"{lp} 所有方案失敗，此頁放棄")
-            self._emit(OcrEventType.ERROR)
+        # Plan C：Grok 切片補救（只處理 Plan B 失敗的框）
+        if self.fallback_api_key and failed_indices:
+            h, w = img.shape[:2]
+            pad = 12
+            grok_client = self._build_fallback_client()
+            ok, fail = 0, 0
+            for i in failed_indices:
+                blk = blk_list[i]
+                bx1, by1, bx2, by2 = blk.xyxy
+                crop = img[max(0,by1-pad):min(h,by2+pad),
+                           max(0,bx1-pad):min(w,bx2+pad)]
+                try:
+                    resp = grok_client.ocr(_img_to_base64(crop), self._SLICE_PROMPT, timeout=120)
+                    clean = re.sub(r'```json\s*|\s*```', '', resp).strip()
+                    data = json.loads(clean)
+                    if isinstance(data, list): data = data[0] if data else {}
+                    if isinstance(data, dict) and data.get('original'):
+                        blk.text = [data['original']]
+                        blk.translation = data.get('translation', '')
+                        self._apply_font_size(blk, data['original'])
+                        self._emit(OcrEventType.GROK_OK)
+                        ok += 1
+                        continue
+                except Exception as e:
+                    self.logger.warning(f"{lp} Plan C 框{i+1} 失敗: {self._explain_error(str(e))}")
+                blk.text = ['●●●']
+                blk.translation = '●●●'
+                fail += 1
+                self._emit(OcrEventType.ERROR)
+            if fail == 0:
+                self.logger.success(f"{lp} Plan C 成功（{ok}/{len(failed_indices)} 框）")
+            else:
+                self.logger.warning(f"{lp} Plan C 完成（{ok}/{len(failed_indices)} 框，{fail} 框失敗）")
+            return
+            
+        for i in failed_indices:
+            blk_list[i].text = ['●●●']
+            blk_list[i].translation = '●●●'
+        self.logger.error(f"{lp} 所有方案失敗，此頁放棄")
+        self._emit(OcrEventType.ERROR)
 
     def ocr_img(self, img: np.ndarray) -> str:
         return self._call_ocr(img)
