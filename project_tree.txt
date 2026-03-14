@@ -1,0 +1,344 @@
+F:\BallonsTranslator-git/
+├── .btrans_cache
+│   └── cache.json
+├── config
+│   ├── textstyles
+│   │   ├── default.json
+│   │   └── msjh.ttc
+│   ├── config.json
+│   ├── stylesheet.css
+│   └── themes.json
+├── data
+│   ├── libs
+│   │   ├── opencv_world455.dll
+│   │   └── patchmatch_inpaint.dll
+│   ├── models
+│   │   ├── manga-ocr-base
+│   │   │   ├── config.json
+│   │   │   ├── preprocessor_config.json
+│   │   │   ├── README.md
+│   │   │   ├── special_tokens_map.json
+│   │   │   ├── tokenizer_config.json
+│   │   │   └── vocab.txt
+│   │   ├── pkuseg
+│   │   │   ├── postag
+│   │   │   │   ├── features.pkl
+│   │   │   │   └── weights.npz
+│   │   │   ├── postag.zip
+│   │   │   ├── spacy_ontonotes
+│   │   │   │   ├── features.msgpack
+│   │   │   │   └── weights.npz
+│   │   │   └── spacy_ontonotes.zip
+│   │   ├── aot_inpainter.ckpt
+│   │   ├── lama_large_512px.ckpt
+│   │   ├── lama_mpe.ckpt
+│   │   ├── mit32px_ocr.ckpt
+│   │   ├── mit48pxctc_ocr.ckpt
+│   │   └── ocr_ar_48px.ckpt
+│   ├── sfx
+│   │   └── finish.wav
+│   ├── alphabet-all-v5.txt
+│   ├── alphabet-all-v7.txt
+│   └── pkusegscores.json
+├── doc
+│   ├── add_translator_ru.md
+│   ├── CHANGELOG.md
+│   ├── CHANGELOG_EN.md
+│   ├── CHANGELOG_PT-BR.md
+│   ├── Como_add_um_novo_tradutor.md
+│   ├── how_to_add_new_translator.md
+│   ├── Manual_TuanziOCR_pt-BR.md
+│   ├── README_ID.md
+│   ├── README_JA.md
+│   ├── README_PT-BR.md
+│   ├── README_RU.md
+│   ├── README_VI.md
+│   ├── saladict.md
+│   ├── saladict_chs.md
+│   ├── saladict_pt-br.md
+│   ├── 加别的翻译器.md
+│   └── 团子OCR说明.md
+├── fonts
+│   └── put fonts here.txt
+├── icons
+│   ├── add.svg
+│   ├── arrow-down.svg
+│   ├── arrow-left.svg
+│   ├── arrow-right.svg
+│   ├── arrow-small-down.svg
+│   ├── arrow-small-left.svg
+│   ├── arrow-small-right.svg
+│   ├── arrow-small-up.svg
+│   ├── arrow-up.svg
+│   ├── batch_queue.svg
+│   ├── batch_queue_activate.svg
+│   ├── bottombar_ocr.svg
+│   ├── bottombar_ocr_activate.svg
+│   ├── bottombar_paintmode.svg
+│   ├── bottombar_paintmode_activate.svg
+│   ├── bottombar_textblock.svg
+│   ├── bottombar_textblock_activate.svg
+│   ├── bottombar_textedit.svg
+│   ├── bottombar_textedit_activate.svg
+│   ├── bottombar_translate.svg
+│   ├── bottombar_translate_activate.svg
+│   ├── case-sensitive.svg
+│   ├── case-sensitive_activated.svg
+│   ├── chevron-down.svg
+│   ├── chevron-right.svg
+│   ├── chevron-up.svg
+│   ├── chrome-close.svg
+│   ├── combobox_arrow.svg
+│   ├── drawingtools_hand.svg
+│   ├── drawingtools_hand_activate.svg
+│   ├── drawingtools_inpaint.svg
+│   ├── drawingtools_inpaint_activate.svg
+│   ├── drawingtools_pen.svg
+│   ├── drawingtools_pen_activate.svg
+│   ├── fontfmt_alignc.svg
+│   ├── fontfmt_alignc_activate.svg
+│   ├── fontfmt_alignl.svg
+│   ├── fontfmt_alignl_activate.svg
+│   ├── fontfmt_alignr.svg
+│   ├── fontfmt_alignr_activate.svg
+│   ├── fontfmt_bold.svg
+│   ├── fontfmt_bold_activate.svg
+│   ├── fontfmt_italic.svg
+│   ├── fontfmt_italic_activate.svg
+│   ├── fontfmt_letterspacing.svg
+│   ├── fontfmt_linespacing.svg
+│   ├── fontfmt_underline.svg
+│   ├── fontfmt_underline_activate.svg
+│   ├── fontfmt_vertical.svg
+│   ├── fontfmt_vertical_activate.svg
+│   ├── icon-design-35.svg
+│   ├── icon.icns
+│   ├── incre_down.svg
+│   ├── incre_up.svg
+│   ├── leftbar_config.svg
+│   ├── leftbar_config_activate.svg
+│   ├── leftbar_imgtrans.svg
+│   ├── leftbar_imgtrans_activate.svg
+│   ├── openbtn.svg
+│   ├── openbtn_activate.svg
+│   ├── regex.svg
+│   ├── regex_activate.svg
+│   ├── replace-all.svg
+│   ├── replace.svg
+│   ├── save_activate.svg
+│   ├── search-stop.svg
+│   ├── search.svg
+│   ├── search_activate.svg
+│   ├── showpagelist.svg
+│   ├── showpagelist_activate.svg
+│   ├── text_rotate_up.svg
+│   ├── text_rotate_vertical.svg
+│   ├── titlebar_close.svg
+│   ├── titlebar_close_activate.svg
+│   ├── titlebar_max.svg
+│   ├── titlebar_min.svg
+│   ├── titlebar_windowmode.svg
+│   ├── whole-word.svg
+│   └── whole-word_activate.svg
+├── logs
+├── modules
+│   ├── inpaint
+│   │   ├── __init__.py
+│   │   ├── aot.py
+│   │   ├── base.py
+│   │   ├── ffc.py
+│   │   ├── lama.py
+│   │   └── patch_match.py
+│   ├── ocr
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── mit32px.py
+│   │   ├── mit48px.py
+│   │   ├── mit48px_ctc.py
+│   │   ├── ocr_google_lens.py
+│   │   ├── ocr_llm.py
+│   │   ├── ocr_macos.py
+│   │   ├── ocr_manga.py
+│   │   ├── ocr_mit.py
+│   │   ├── ocr_none.py
+│   │   ├── ocr_stariver.py
+│   │   └── ocr_windows.py
+│   ├── textdetector
+│   │   ├── ctd
+│   │   │   ├── __init__.py
+│   │   │   ├── basemodel.py
+│   │   │   ├── inference.py
+│   │   │   └── textmask.py
+│   │   ├── yolov5
+│   │   │   ├── __init__.py
+│   │   │   ├── common.py
+│   │   │   ├── yolo.py
+│   │   │   └── yolov5_utils.py
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── db_utils.py
+│   │   ├── detector_ctd.py
+│   │   ├── detector_stariver.py
+│   │   ├── detector_yolov8.py
+│   │   └── panel_finder.py
+│   ├── translators
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── constants.py
+│   │   ├── exceptions.py
+│   │   ├── hooks.py
+│   │   ├── trans_baidu.py
+│   │   ├── trans_caiyun.py
+│   │   ├── trans_chatgpt.py
+│   │   ├── trans_chatgpt_exp.py
+│   │   ├── trans_debug.py
+│   │   ├── trans_deepl.py
+│   │   ├── trans_deeplx.py
+│   │   ├── trans_deeplx_api.py
+│   │   ├── trans_google.py
+│   │   ├── trans_papago.py
+│   │   ├── trans_sakura.py
+│   │   ├── trans_sugoi.py
+│   │   ├── trans_tgw.py
+│   │   ├── trans_trnslatorsmodule.py
+│   │   ├── trans_yandex.py
+│   │   ├── trans_yandexfree.py
+│   │   └── trans_youdao_api.py
+│   ├── __init__.py
+│   ├── base.py
+│   └── prepare_local_files.py
+├── scripts
+│   ├── export to photoshop
+│   │   ├── Import from BallonTranslator JSON.jsx
+│   │   └── install_manual.md
+│   ├── build-macos-app.sh
+│   ├── build_win.bat
+│   ├── download_models.sh
+│   ├── local_gitpull.bat
+│   ├── macos-build-script-arm64.sh
+│   ├── svgscript.py
+│   └── update_translation.py
+├── tests
+│   └── ui
+│       ├── __init__.py
+│       └── text_rendering.py
+├── tmp
+│   ├── stderr.txt
+│   └── stdout.txt
+├── translate
+│   ├── pt_BR.qm
+│   ├── pt_BR.ts
+│   ├── ru_RU.qm
+│   ├── ru_RU.ts
+│   ├── zh_CN.qm
+│   └── zh_CN.ts
+├── ui
+│   ├── custom_widget
+│   │   ├── __init__.py
+│   │   ├── checkbox.py
+│   │   ├── combobox.py
+│   │   ├── flow_layout.py
+│   │   ├── helper.py
+│   │   ├── label.py
+│   │   ├── message.py
+│   │   ├── ocr_stats_bar.py
+│   │   ├── push_button.py
+│   │   ├── scrollbar.py
+│   │   ├── slider.py
+│   │   ├── view_panel.py
+│   │   └── widget.py
+│   ├── framelesswindow
+│   │   ├── fw_qt5
+│   │   │   ├── linux
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── window_effect.py
+│   │   │   ├── mac
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── window_effect.py
+│   │   │   ├── utils
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── linux_utils.py
+│   │   │   │   ├── mac_utils.py
+│   │   │   │   └── win32_utils.py
+│   │   │   ├── windows
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── c_structures.py
+│   │   │   │   └── window_effect.py
+│   │   │   └── __init__.py
+│   │   ├── fw_qt6
+│   │   │   ├── linux
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── window_effect.py
+│   │   │   ├── mac
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── window_effect.py
+│   │   │   ├── utils
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── linux_utils.py
+│   │   │   │   ├── mac_utils.py
+│   │   │   │   └── win32_utils.py
+│   │   │   ├── windows
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── c_structures.py
+│   │   │   │   └── window_effect.py
+│   │   │   └── __init__.py
+│   │   └── __init__.py
+│   ├── __init__.py
+│   ├── batch_queue_panel.py
+│   ├── canvas.py
+│   ├── config_proj.py
+│   ├── configpanel.py
+│   ├── cursor.py
+│   ├── drawing_commands.py
+│   ├── drawingpanel.py
+│   ├── fontformat_commands.py
+│   ├── funcmaps.py
+│   ├── global_search_widget.py
+│   ├── image_edit.py
+│   ├── io_thread.py
+│   ├── keywordsubwidget.py
+│   ├── mainwindow.py
+│   ├── mainwindowbars.py
+│   ├── misc.py
+│   ├── module_manager.py
+│   ├── module_parse_widgets.py
+│   ├── page_search_widget.py
+│   ├── scene_textlayout.py
+│   ├── scenetext_manager.py
+│   ├── shared_widget.py
+│   ├── text_advanced_format.py
+│   ├── text_effect.py
+│   ├── text_graphical_effect.py
+│   ├── text_panel.py
+│   ├── text_style_presets.py
+│   ├── textedit_area.py
+│   ├── textedit_commands.py
+│   ├── texteditshapecontrol.py
+│   └── textitem.py
+├── utils
+│   ├── __init__.py
+│   ├── config.py
+│   ├── download_util.py
+│   ├── fontformat.py
+│   ├── imgproc_utils.py
+│   ├── io_utils.py
+│   ├── logger.py
+│   ├── registry.py
+│   ├── shared.py
+│   ├── split_text_region.py
+│   ├── stroke_width_calculator.py
+│   ├── structures.py
+│   ├── text_layout.py
+│   ├── text_processing.py
+│   ├── textblock.py
+│   └── textblock_mask.py
+├── 架構圖png
+├── .gitattributes
+├── .gitignore
+├── launch.py
+├── launch.spec
+├── launch_win.bat
+├── LICENSE
+├── print_tree.py
+├── README.md
+└── requirements.txt

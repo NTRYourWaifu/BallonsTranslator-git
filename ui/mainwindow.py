@@ -91,7 +91,10 @@ class MainWindow(mainwindow_cls):
         self.setupConfig()
         self.setupShortcuts()
         self.setupRegisterWidget()
-        self.showMaximized()
+        primary_screen = QGuiApplication.primaryScreen()
+        if pcfg.window_x >= 0 and pcfg.window_w > 0:
+            self.setGeometry(pcfg.window_x, pcfg.window_y, pcfg.window_w, pcfg.window_h)
+        self.show()
         self.setAcceptDrops(True)
 
         if open_dir != '' and osp.exists(open_dir):
@@ -169,6 +172,7 @@ class MainWindow(mainwindow_cls):
         
         self.titleBar = TitleBar(self)
         self.titleBar.closebtn_clicked.connect(self.on_closebtn_clicked)
+        self.titleBar.restartBtn.clicked.connect(self.restart_signal)
         self.titleBar.display_lang_changed.connect(self.on_display_lang_changed)
         self.bottomBar = BottomBar(self)
         self.bottomBar.textedit_checkchanged.connect(self.setTextEditMode)
@@ -452,6 +456,11 @@ class MainWindow(mainwindow_cls):
         self.st_manager.hovering_transwidget = None
         self.st_manager.blockSignals(True)
         self.canvas.prepareClose()
+        geo = self.geometry()
+        pcfg.window_x = geo.x()
+        pcfg.window_y = geo.y()
+        pcfg.window_w = geo.width()
+        pcfg.window_h = geo.height()
         self.save_config()
         if not self.imgtrans_proj.is_empty:
             self.imgtrans_proj.save()

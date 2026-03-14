@@ -52,6 +52,11 @@ _SVG_BATCH_QUEUE = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg
   <rect x="7" y="11" width="14" height="10" rx="1.5" fill="none" stroke="#cccccc" stroke-width="1.8"/>
 </svg>'''
 
+_SVG_RESTART = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <path d="M4 12 A8 8 0 1 1 8 19.3" fill="none" stroke="#cccccc" stroke-width="2.2" stroke-linecap="round"/>
+  <polygon points="3,7 8,12 3,17" fill="#cccccc"/>
+</svg>'''
+
 
 if C.FLAG_QT6:
     from qtpy.QtGui import QAction
@@ -523,6 +528,11 @@ class TitleBar(Widget):
         hlayout.addStretch()
 
         if not C.ON_MACOS:
+            self.restartBtn = QPushButton()
+            self.restartBtn.setObjectName('restartBtn')
+            self.restartBtn.setToolTip(self.tr('Restart'))
+            self.restartBtn.setIcon(_svg_icon(_SVG_RESTART, 16))
+            self.restartBtn.setFixedSize(46, 27)
             self.minBtn = QPushButton()
             self.minBtn.setObjectName('minBtn')
             self.minBtn.clicked.connect(self.onMinBtnClicked)
@@ -533,6 +543,7 @@ class TitleBar(Widget):
             self.closeBtn = QPushButton()
             self.closeBtn.setObjectName('closeBtn')
             self.closeBtn.clicked.connect(self.closebtn_clicked)
+            hlayout.addWidget(self.restartBtn)
             hlayout.addWidget(self.minBtn)
             hlayout.addWidget(self.maxBtn)
             hlayout.addWidget(self.closeBtn)
