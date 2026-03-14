@@ -185,7 +185,7 @@ class DetectorYOLOv8(TextDetectorBase):
 
             boxes5 = new_boxes
 
-        return [[b[0], b[1], b[2], b[3]] for b in boxes5]
+        return boxes5  # [x1, y1, x2, y2, orig_w]
 
     def _detect(self, img: np.ndarray) -> Tuple[np.ndarray, List[TextBlock]]:
         if self.model is None:
@@ -204,7 +204,7 @@ class DetectorYOLOv8(TextDetectorBase):
         self._last_raw_boxes = raw_boxes
 
         blk_list = []
-        for (x1, y1, x2, y2) in merged_boxes:
+        for (x1, y1, x2, y2, orig_w) in merged_boxes:
             xywh  = np.array([[x1, y1, x2 - x1, y2 - y1]])
             lines = xywh2xyxypoly(xywh).reshape(-1, 4, 2).tolist()
             blk   = TextBlock(xyxy=[x1, y1, x2, y2], lines=lines)
@@ -222,7 +222,10 @@ class DetectorYOLOv8(TextDetectorBase):
                 if not is_vertical:
                     blk.angle = 0
 
-            blk._detected_font_size = 0
+            # orig_w = 合併前最窄框寬 ≈ 單欄寬 ≈ 字寬（最準確來源）
+            # 若沒有合併發生，orig_w == box_w，OCR 側改用字數數學推算
+            blk._detected_font_size = float(orig_w)
+            self.logger.debug(f"det box=({x1},{y1},{x2},{y2}) merged_w={x2-x1} orig_w={orig_w}")
             blk_list.append(blk)
 
         mask = np.zeros(img.shape[:2], dtype=np.uint8)

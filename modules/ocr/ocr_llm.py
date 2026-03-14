@@ -214,17 +214,46 @@ class OCRLlm(OCRBase):
         return cv2.bitwise_and(img, img, mask=mask)
 
     # ── 字體大小 ──────────────────────────────────────────────
-    def _auto_font_size(self, blk: TextBlock, text: str) -> float:
+    def _auto_font_size(self, blk: TextBlock, text: str = '') -> float:
         x1, y1, x2, y2 = blk.xyxy
-        box_area = max((x2 - x1) * (y2 - y1), 1)
-        char_count = max(len(text.replace(' ', '').replace('\n', '')), 1)
-        font_size_px = math.sqrt(box_area / char_count) * self.font_size_ratio
-        return max(8.0, min(72.0, font_size_px * 0.75))
+        box_w = max(x2 - x1, 1)
+        box_h = max(y2 - y1, 1)
+        orig_w = blk._detected_font_size  # detector 存入的合併前最窄寬度
 
-    def _apply_font_size(self, blk: TextBlock, text: str):
+        # 情境 A：orig_w 明顯小於 box_w → 代表有合併發生
+        # orig_w ≈ 單欄寬 ≈ 字寬，最準確，直接用
+        if 0 < orig_w < box_w * 0.8:
+            return max(8.0, min(72.0, orig_w * self.font_size_ratio))
+
+        # 情境 B：orig_w ≈ box_w → 沒有合併，YOLO 直接掃出整塊大框
+        # 改用「字數 + 面積數學推算」算出整數欄數，再得出字寬
+        if text:
+            clean_text = re.sub(r'\s+', '', text)
+            N = max(len(clean_text), 1)
+            S_est = math.sqrt((box_w * box_h) / N)  # 理論字體大小（正方形假設）
+            if blk.vertical:
+                estimated_cols = max(1, round(box_w / S_est))
+                final_fs = box_w / estimated_cols
+            else:
+                estimated_rows = max(1, round(box_h / S_est))
+                final_fs = box_h / estimated_rows
+            return max(8.0, min(72.0, final_fs * self.font_size_ratio))
+
+        # fallback：無文字時直接用 orig_w
+        return max(8.0, min(72.0, orig_w * self.font_size_ratio))
+
+    def _apply_font_size(self, blk: TextBlock, text: str = ''):
+        orig_w = blk._detected_font_size
         fs = self._auto_font_size(blk, text)
+        x1, y1, x2, y2 = blk.xyxy
+        box_w = x2 - x1
+        merged = orig_w < box_w * 0.8
+        self.logger.debug(
+            f"font_size: orig_w={orig_w:.1f} box={box_w}x{y2-y1}"
+            f" {'[merged→orig_w]' if merged else '[no merge→math]'}"
+            f" → fs={fs:.1f} | text={text[:10]!r}"
+        )
         blk.font_size = fs
-        blk._detected_font_size = fs
 
     # ── 底層 API 呼叫 ─────────────────────────────────────────
     # ── 錯誤碼中文對照 ───────────────────────────────────────
@@ -345,11 +374,13 @@ class OCRLlm(OCRBase):
 
     _GRID_PROMPT = (
         "This image is a grid of manga text box crops.\n"
-        "The grid is arranged RIGHT-TO-LEFT in columns, TOP-TO-BOTTOM within each column.\n"
-        "index 0 is at the TOP of the RIGHTMOST column, then goes DOWN, then moves LEFT to the next column.\n"
-        "Each cell contains one text box. Read the Japanese text in each cell and translate to Traditional Chinese.\n"
+        "Each cell has a black label on its LEFT side showing its index number.\n"
+        "Use the label numbers to identify each cell — do NOT count or guess order.\n"
+        "Read the Japanese text in each cell and translate to Traditional Chinese.\n"
         "\n"
-        "Output ONLY a valid JSON array, one entry per cell, ordered by index:\n"
+        "Translation rules:\n"
+        "- Translate the original text directly. Do NOT add any parenthetical notes, explanations, or romanizations.\n"
+        "- Output ONLY a valid JSON array, one entry per cell:\n"
         '[{"index": 0, "direction": "v or h", "original": "...", "translation": "..."}, ...]\n'
         'direction: "v"=vertical/tategumi, "h"=horizontal/yokogumi.\n'
         'If a cell has no readable text: {"index": N, "direction": "v", "original": "", "translation": ""}\n'
@@ -363,6 +394,7 @@ class OCRLlm(OCRBase):
 
         label_w = max(20, int(w_img * 0.018))  # 左側編號欄寬
         gap = max(6, int(w_img * 0.005))        # 格子間距
+
 
         # 裁切所有框，保持原始比例
         crops = []
@@ -406,7 +438,16 @@ class OCRLlm(OCRBase):
         canvas_h = sum(row_hs) + (len(rows) + 1) * gap
         canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
-        # 貼圖：LLM 和 debug 看同一張，左側黑底寫編號
+        # 先建 visual_order（右到左、上到下），再做反查表 orig_idx → visual_idx
+        # visual_order[視覺index] = orig_idx
+        visual_order = []
+        for r, row in enumerate(rows):
+            for orig_idx, _ in reversed(row):
+                visual_order.append(orig_idx)
+        orig_to_visual = {orig_idx: vi for vi, orig_idx in enumerate(visual_order)}
+
+        # 貼圖：在 label 欄寫視覺 index，讓 LLM 有數字錨點
+        font_thick = 1
         y_cursor = gap
         for r, row in enumerate(rows):
             x_cursor = gap
@@ -414,30 +455,54 @@ class OCRLlm(OCRBase):
                 ch, cw = crop.shape[:2]
                 row_h = row_hs[r]
 
-                # 黑色 label 欄
+                # 黑色 label 欄 + 視覺 index 數字
                 canvas[y_cursor:y_cursor+row_h, x_cursor:x_cursor+label_w] = 0
+                vi = orig_to_visual[orig_idx]
+                label = str(vi)
+                font_scale = max(0.3, min(label_w / 40, row_h * 0.6 / 20))
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+                tx = x_cursor + max(0, (label_w - tw) // 2)
+                ty = y_cursor + (row_h + th) // 2
+                cv2.putText(canvas, label, (tx, ty),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thick, cv2.LINE_AA)
+
+
                 # 裁切圖靠左上貼
                 canvas[y_cursor:y_cursor+ch,
                        x_cursor+label_w:x_cursor+label_w+cw] = crop
-        
+
+                # 醒目外框：黑色描邊 + 亮黃色內框
+                cx1, cy1 = x_cursor, y_cursor
+                cx2, cy2 = x_cursor + label_w + cw, y_cursor + row_h
+                cv2.rectangle(canvas, (cx1,     cy1),     (cx2,     cy2),     (0,   0,   0), 3)
+                cv2.rectangle(canvas, (cx1 + 2, cy1 + 2), (cx2 - 2, cy2 - 2), (0, 220, 255), 2)
+
                 x_cursor += label_w + cw + gap
             y_cursor += row_hs[r] + gap
 
-        # 建立視覺順序映射：LLM 按右到左、上到下讀
-        # visual_order[視覺index] = orig_idx
-        visual_order = []
-        for r, row in enumerate(rows):
-            for orig_idx, _ in reversed(row):
-                visual_order.append(orig_idx)
 
-        self.logger.debug(f"grid img: {len(crops)}框 → {len(rows)}行, canvas={canvas_w}x{canvas_h}")
-        self.logger.debug(f"visual_order: {visual_order}")
-
-        # DEBUG：存到專案根目錄
-        safe_name = self.current_imgname.replace('/', '_').replace('\\', '_') or 'unknown'
-        debug_path = f"grid_debug_{safe_name}.jpg"
+         # DEBUG：存到原圖目錄下的 ocr_debug 資料夾
+        import os
+        
+        # 取得原圖的資料夾路徑與檔名
+        img_dir = os.path.dirname(self.current_imgname)
+        img_name = os.path.basename(self.current_imgname) or 'unknown'
+        
+        # 若無路徑資訊 (防呆)，則預設使用當前目錄
+        if not img_dir:
+            img_dir = '.'
+            
+        # 建立專屬的 ocr_debug 資料夾 (exist_ok=True 代表資料夾已存在也不會報錯)
+        debug_dir = os.path.join(img_dir, 'ocr_debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # 抽換副檔名，確保 Debug 圖統一存成 .jpg 格式 (避免原圖是 cv2 不支援寫入的格式)
+        file_stem = os.path.splitext(img_name)[0]
+        safe_name = f"{file_stem}_grid.jpg"
+        
+        # 組合最終路徑並存檔
+        debug_path = os.path.join(debug_dir, safe_name)
         cv2.imwrite(debug_path, canvas)
-        self.logger.warning(f"grid debug 圖已存至 {debug_path}")
 
         return canvas, visual_order
 
