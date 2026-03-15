@@ -944,6 +944,39 @@ class MainWindow(mainwindow_cls):
         if page_key == self.imgtrans_proj.current_img:
             self.st_manager.updateTranslation()
 
+    def _prepare_imgtrans_run(self, start_from: str = None, reset_stats: bool = True):
+        """on_run_imgtrans 的前置工作，支援從指定頁開始"""
+        self.backup_blkstyles.clear()
+        if self.bottomBar.textblockChecker.isChecked():
+            self.bottomBar.textblockChecker.click()
+        self.postprocess_mt_toggle = False
+
+        all_disabled = pcfg.module.all_stages_disabled()
+        if pcfg.module.enable_detect:
+            pages = list(self.imgtrans_proj.pages.keys())
+            if start_from and start_from in pages:
+                idx = pages.index(start_from)
+                run_pages = pages[idx:]
+            else:
+                run_pages = pages
+            for page in run_pages:
+                self.imgtrans_proj.pages[page].clear()
+        else:
+            self.st_manager.updateTextBlkList()
+            for blklist in self.imgtrans_proj.pages.values():
+                ffmt_list = []
+                self.backup_blkstyles.append(ffmt_list)
+                for textblk in blklist:
+                    if not pcfg.module.enable_detect:
+                        ffmt_list.append(textblk.fontformat.deepcopy())
+                    if pcfg.module.enable_ocr:
+                        textblk.text = []
+                        textblk.set_font_colors((0, 0, 0), (0, 0, 0))
+                    if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
+                        textblk.rich_text = ''
+                    textblk.vertical = textblk.src_is_vertical
+        self.module_manager.runImgtransPipeline(start_from=start_from, reset_stats=reset_stats)
+
     def on_imgtrans_pipeline_finished(self):
         self.backup_blkstyles.clear()
         self._run_imgtrans_wo_textstyle_update = False
@@ -963,6 +996,8 @@ class MainWindow(mainwindow_cls):
                 else:
                     self.batchQueuePanel.markDone(self._gui_batch_current)
             self._run_next_gui_batch()
+        else:
+            self.module_manager.play_finish_sound()
 
     def postprocess_translations(self, blk_list: List[TextBlock]) -> None:
         src_is_cjk = is_cjk(pcfg.module.translate_source)
@@ -1134,6 +1169,16 @@ class MainWindow(mainwindow_cls):
         self._prepare_imgtrans_run()
 
     def on_stop_imgtrans(self):
+        if self._gui_batch_running:
+            LOGGER.info('使用者手動中止了批量翻譯佇列')
+            self._gui_batch_running = False
+            self._gui_batch_dirs.clear()
+            if self._gui_batch_current:
+                # 把當前被中斷的資料夾標記為等待中 (或異常) 讓使用者可以重跑
+                self.batchQueuePanel.markError(self._gui_batch_current)
+                self._gui_batch_current = None
+            self.batchQueuePanel.setRunning(False)
+            
         self.module_manager.stopImgtransPipeline()
 
     def on_resume_here(self):
@@ -1141,39 +1186,6 @@ class MainWindow(mainwindow_cls):
         if not current:
             return
         self._prepare_imgtrans_run(start_from=current)
-
-    def _prepare_imgtrans_run(self, start_from: str = None):
-        """on_run_imgtrans 的前置工作，支援從指定頁開始"""
-        self.backup_blkstyles.clear()
-        if self.bottomBar.textblockChecker.isChecked():
-            self.bottomBar.textblockChecker.click()
-        self.postprocess_mt_toggle = False
-
-        all_disabled = pcfg.module.all_stages_disabled()
-        if pcfg.module.enable_detect:
-            pages = list(self.imgtrans_proj.pages.keys())
-            if start_from and start_from in pages:
-                idx = pages.index(start_from)
-                run_pages = pages[idx:]
-            else:
-                run_pages = pages
-            for page in run_pages:
-                self.imgtrans_proj.pages[page].clear()
-        else:
-            self.st_manager.updateTextBlkList()
-            for blklist in self.imgtrans_proj.pages.values():
-                ffmt_list = []
-                self.backup_blkstyles.append(ffmt_list)
-                for textblk in blklist:
-                    if not pcfg.module.enable_detect:
-                        ffmt_list.append(textblk.fontformat.deepcopy())
-                    if pcfg.module.enable_ocr:
-                        textblk.text = []
-                        textblk.set_font_colors((0, 0, 0), (0, 0, 0))
-                    if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
-                        textblk.rich_text = ''
-                    textblk.vertical = textblk.src_is_vertical
-        self.module_manager.runImgtransPipeline(start_from=start_from)
 
     def on_transpanel_changed(self):
         self.canvas.editor_index = self.rightComicTransStackPanel.currentIndex()
@@ -1287,6 +1299,8 @@ class MainWindow(mainwindow_cls):
         self._gui_batch_dirs = list(valid_dirs)
         self._gui_batch_running = True
         self.batchQueuePanel.setRunning(True)
+        if self.module_manager.ocr_stats_bar is not None:
+            self.module_manager.ocr_stats_bar.reset()
         LOGGER.info(f'開始 GUI 批量翻譯，共 {len(valid_dirs)} 個資料夾')
         self._run_next_gui_batch()
 
@@ -1298,6 +1312,7 @@ class MainWindow(mainwindow_cls):
             self._gui_batch_current = None
             self.batchQueuePanel.setRunning(False)
             LOGGER.info('批量翻譯全部完成！')
+            self.module_manager.play_finish_sound()
             return
 
         d = self._gui_batch_dirs.pop(0)
@@ -1305,7 +1320,7 @@ class MainWindow(mainwindow_cls):
         self.batchQueuePanel.markRunning(d)
         LOGGER.info(f'批量翻譯：{d} （剩餘 {len(self._gui_batch_dirs)} 個）')
         self.openDir(d)
-        self.run_imgtrans()
+        self._prepare_imgtrans_run(reset_stats=False)
 
     def _on_batch_ocr_event(self, event_type: str):
         """轉發 OCR 事件到佇列面板的當前資料夾"""
@@ -1413,6 +1428,7 @@ class MainWindow(mainwindow_cls):
             while self.imsave_thread.isRunning():
                 time.sleep(0.1)
             LOGGER.info(f'finished translating all dirs, quit app...')
+            self.module_manager.play_finish_sound()
             self.app.quit()
             return
         d = self.exec_dirs.pop(0)

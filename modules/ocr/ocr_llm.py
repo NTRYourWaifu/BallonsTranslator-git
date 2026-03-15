@@ -7,6 +7,7 @@ import json
 import time
 import requests
 import re
+import threading
 from typing import List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -116,7 +117,9 @@ class OCRLlm(OCRBase):
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_ratio': {'value': '0.8', 'description': '字體大小係數（0.5~1.2）'},
         'debug_log': {'type': 'checkbox', 'value': False,
-                      'description': '輸出 font_size debug log'},
+                      'description': '輸出 OCR 流程 log（Plan A/B/C 結果、解析失敗等）'},
+        'debug_font_log': {'type': 'checkbox', 'value': False,
+                           'description': '輸出每框字型推算過程（原文行數、fs 計算路徑）'},
         'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
         'fallback_model':   {'value': 'grok-4.20-beta-0309-non-reasoning',
                              'description': '備援模型，需支援 vision'},
@@ -130,6 +133,11 @@ class OCRLlm(OCRBase):
         super().__init__(**params)
         self.client = None
         self.last_request_time = 0
+        
+        # 速率控制屬性初始化 (從 GeminiClient 移至此處)
+        self._api_lock = threading.Lock()
+        self._last_api_time = 0.0
+        
         self.page_counter = 0
         self.current_imgname = ''
         self.current_img_dir = ''
@@ -169,6 +177,9 @@ class OCRLlm(OCRBase):
     @property
     def debug_log(self) -> bool: return bool(self.params['debug_log']['value'])
     @property
+    def debug_font_log(self) -> bool:
+        return bool(self.params.get('debug_font_log', {}).get('value', False))
+    @property
     def fallback_api_key(self) -> str:  return self.params['fallback_api_key']['value']
     @property
     def fallback_model(self) -> str:    return self.params['fallback_model']['value']
@@ -199,61 +210,139 @@ class OCRLlm(OCRBase):
 
     # ── 速率控制 ──────────────────────────────────────────────
     def _respect_delay(self):
-        elapsed = time.time() - self.last_request_time
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
-        self.last_request_time = time.time()
+        with self._api_lock:
+            elapsed = time.time() - self._last_api_time
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            self._last_api_time = time.time()
 
     # ── 字體大小 ──────────────────────────────────────────────
-    def _auto_font_size(self, blk: TextBlock, text: str = '') -> float:
+
+    @staticmethod
+    def _count_lines(text: str, fs: float, main_axis: float) -> int:
+        """
+        給定字型大小 fs 和主軸長度，推算原文會換幾行/欄。
+
+        邏輯：
+          1. 按 \\n 切成硬換行段落
+          2. 每段字數 × fs > main_axis 時自動換行，累加行數
+          3. 回傳總行/欄數
+
+        text     : 原文（日文 OCR 結果）
+        fs       : 估計字型大小（像素）
+        main_axis: 橫排 = box_w，直排 = box_h
+        """
+        if fs <= 0 or main_axis <= 0:
+            return 1
+        chars_per_line = max(1, int(main_axis / fs))
+        lines = text.split('\n')
+        total = 0
+        for seg in lines:
+            seg_len = max(len(re.sub(r'\s', '', seg)), 1)
+            total += math.ceil(seg_len / chars_per_line)
+        return max(total, 1)
+
+    def _calc_fs_from_source(self, blk: TextBlock, src_text: str) -> float:
+        """
+        用 OCR 原文（日文）推算合理字型大小。
+
+        步驟：
+          1. 以 _detected_font_size 為初始 fs 猜測值
+             若無則用框的短邊 / 2 當起點
+          2. 迭代兩輪：
+             用 fs 算出行/欄數 → 用行/欄數反推 fs
+          3. 乘以 font_size_ratio 回傳
+
+        橫排：主軸 = box_w，副軸 = box_h，fs = box_h / 行數
+        直排：主軸 = box_h，副軸 = box_w，fs = box_w / 欄數
+        """
         x1, y1, x2, y2 = blk.xyxy
         box_w = max(x2 - x1, 1)
         box_h = max(y2 - y1, 1)
         orig_w = getattr(blk, '_detected_font_size', 0)
 
-        # 【渲染上限】：保留最大到 250.0，讓標題字可以正常放大繪製，不被壓扁
+        if blk.vertical:
+            main_axis  = box_h   # 每欄沿 Y 方向延伸
+            cross_axis = box_w   # 欄數沿 X 方向
+        else:
+            main_axis  = box_w   # 每行沿 X 方向延伸
+            cross_axis = box_h   # 行數沿 Y 方向
+
+        # 初始 fs 猜測
+        if 0 < orig_w < cross_axis * 0.95:
+            fs_guess = orig_w
+        else:
+            fs_guess = cross_axis / 2.0
+
+        # 迭代兩輪收斂
+        fs = fs_guess
+        for _ in range(2):
+            n = self._count_lines(src_text, fs, main_axis)
+            fs = cross_axis / n
+
+        return max(8.0, min(250.0, fs * self.font_size_ratio))
+
+    def _auto_font_size(self, blk: TextBlock, text: str = '') -> float:
+        """
+        計算字型大小。
+
+        優先使用 _calc_fs_from_source（原文反推），
+        fallback 到舊的面積開根號估算。
+        """
+        x1, y1, x2, y2 = blk.xyxy
+        box_w = max(x2 - x1, 1)
+        box_h = max(y2 - y1, 1)
+        orig_w = getattr(blk, '_detected_font_size', 0)
+
+        # 有原文 → 用原文行數反推（B-1 新邏輯）
+        if text:
+            return self._calc_fs_from_source(blk, text)
+
+        # 無原文 fallback：沿用舊邏輯
+        # （_detected_font_size 可信時直接用，否則面積開根號估算）
         if 0 < orig_w < box_w * 0.8:
             return max(8.0, min(250.0, orig_w * self.font_size_ratio))
 
-        if text:
-            clean_text = re.sub(r'\s+', '', text)
-            N = max(len(clean_text), 1)
-            S_est = math.sqrt((box_w * box_h) / N)
-            if blk.vertical:
-                estimated_cols = max(1, round(box_w / S_est))
-                final_fs = box_w / estimated_cols
-            else:
-                estimated_rows = max(1, round(box_h / S_est))
-                final_fs = box_h / estimated_rows
-            return max(8.0, min(250.0, final_fs * self.font_size_ratio))
-
-        return max(8.0, min(250.0, box_w * self.font_size_ratio))
+        return max(8.0, min(250.0,
+            math.sqrt(box_w * box_h) / 4 * self.font_size_ratio
+        ))
 
     def _apply_font_size(self, blk: TextBlock, text: str = ''):
         orig_w = getattr(blk, '_detected_font_size', 0)
         fs = self._auto_font_size(blk, text)
         x1, y1, x2, y2 = blk.xyxy
         box_w = x2 - x1
-        merged = 0 < orig_w < box_w * 0.8
-        
-        # ⚠️ 【警告門檻】：恢復嚴格的警告區間 (<12 或 >65)
-        # 如果大於 65，它依然會畫到 123 那麼大（因為渲染上限是 250）
-        # 但黃色三角形會盡責地亮起，提醒你「這個字特別大哦」。
-        # 若是標題你可以忽略；若是內文，你就知道出 Bug 了！
+        box_h = y2 - y1
+
         is_abnormal = fs < 12.0 or fs > 65.0
-        
+
         if is_abnormal:
             self.logger.warning(
-                f"⚠️字型異常: fs={fs:.1f} (orig_w={orig_w:.1f}, box={box_w}x{y2-y1}) | text={text[:10]!r}"
+                f"⚠️字型異常: fs={fs:.1f} "
+                f"(orig_w={orig_w:.1f}, box={box_w}x{box_h}, "
+                f"vert={blk.vertical}) | text={text[:12]!r}"
             )
             self._emit(OcrEventType.FONT_WARN)
-        elif self.debug_log:
+
+        if self.debug_font_log:
+            # 重新跑一次 _count_lines 拿行數，僅供 log 顯示用
+            if text and blk.vertical:
+                n = self._count_lines(text, fs / self.font_size_ratio, box_h)
+                axis_info = f"box_h={box_h} → {n}欄 → fs={box_w/n:.1f}"
+            elif text:
+                n = self._count_lines(text, fs / self.font_size_ratio, box_w)
+                axis_info = f"box_w={box_w} → {n}行 → fs={box_h/n:.1f}"
+            else:
+                axis_info = 'no_text→fallback'
+            path = 'src→lines' if text else ('orig_w' if 0 < orig_w < box_w * 0.8 else 'fallback')
             self.logger.debug(
-                f"font_size: orig_w={orig_w:.1f} box={box_w}x{y2-y1}"
-                f" {'[merged→orig_w]' if merged else '[no merge→math]'}"
-                f" → fs={fs:.1f} | text={text[:10]!r}"
+                f"[font] {path} | orig_w={orig_w:.1f} {axis_info}"
+                f" ×ratio={self.font_size_ratio} → fs={fs:.1f}"
+                f" {'⚠️' if is_abnormal else '✓'}"
+                f" | vert={blk.vertical} xyxy={blk.xyxy}"
+                f" | text={text[:12]!r}"
             )
-            
+
         blk.font_size = fs
 
     # ── 底層 API 呼叫 ─────────────────────────────────────────
@@ -285,6 +374,8 @@ class OCRLlm(OCRBase):
             return 'ERR:未設定API金鑰'
         img_b64 = _img_to_base64(img)
         target_prompt = custom_prompt
+        
+        # 固定遞增重試等待
         max_retries = 3
         for attempt in range(max_retries):
             self._respect_delay()
@@ -292,9 +383,9 @@ class OCRLlm(OCRBase):
                 return self.client.ocr(img_b64, target_prompt)
             except Exception as e:
                 err = str(e)
-                if '429' in err or 'exhausted' in err.lower():
-                    wait = 3 * (attempt + 1)
-                    self.logger.warning(f"限速，暫停 {wait}s 重試 ({attempt+1}/{max_retries})...")
+                if '429' in err or 'exhausted' in err.lower() or 'quota' in err.lower():
+                    wait = 1.5 * (attempt + 1)
+                    self.logger.warning(f"限速，暫停 {wait:.1f}s 重試 ({attempt+1}/{max_retries})...")
                     time.sleep(wait)
                 elif 'Blocked' in err or 'PROHIBITED_CONTENT' in err:
                     return 'BLOCKED_BY_SAFETY'
@@ -362,7 +453,6 @@ class OCRLlm(OCRBase):
                 self._apply_font_size(blk, item['original'])
                 matched += 1
 
-            self.logger.debug(f"全頁解析：{matched}/{len(blk_list)} 框成功")
             return matched > 0
         except Exception as e:
             self.logger.warning(f"全頁解析失敗: {e}")
@@ -478,7 +568,6 @@ class OCRLlm(OCRBase):
         debug_path = os.path.join(debug_dir, safe_name)
         
         cv2.imwrite(debug_path, canvas)
-        self.logger.info(f"[{img_name}] 已產生 Debug 網格圖: {os.path.abspath(debug_path)}")
 
         return canvas, visual_order
 
@@ -502,6 +591,7 @@ class OCRLlm(OCRBase):
     # ── 切片模式 ──────────────────────────────────────────────
     _SLICE_PROMPT = (
         "Extract the Japanese text from this image and translate to Traditional Chinese. "
+        "Line breaks: use the original text's line breaks as a loose reference — keep a line break in the translation only if it fits the natural meaning or rhythm. Do NOT add extra line breaks. "
         "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\"}. "
         "If the image contains NO TEXT, output an empty JSON {}."
     )
@@ -561,10 +651,13 @@ class OCRLlm(OCRBase):
 
         results_map = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
-            futs = {
-                ex.submit(self._process_single_blk, i, blk, crop, log_prefix): i
-                for i, blk, crop in tasks
-            }
+            futs = {}
+            for i, (orig_idx, blk, crop) in enumerate(tasks):
+                futs[ex.submit(self._process_single_blk, orig_idx, blk, crop, log_prefix)] = orig_idx
+                # 在分配任務時加入固定延遲，完美錯開併發流量
+                if i < len(tasks) - 1:
+                    time.sleep(0.3)
+
             for f in as_completed(futs):
                 idx, rb = f.result()
                 results_map[idx] = rb

@@ -38,8 +38,13 @@ FILES = [
 
     # UI 核心 (保留 Pipeline 相關)
     "ui/module_manager.py",
+    "ui/mainwindow.py",
+    "ui/mainwindowbars.py",
     "ui/config_proj.py",
     "ui/funcmaps.py",
+    "ui/batch_queue_panel.py",
+    "ui/custom_widget/ocr_stats_bar.py",
+
 
     # 入口
     "launch.py",

@@ -59,8 +59,8 @@ _OCR_PLANS = [
 ]
 
 _OCR_TOOLTIPS = [
-    'Plan A 原圖成功', 'Plan B 黑圖成功', 'Plan C 切片成功',
-    'Plan D Grok 備援', '異常 / 放棄',
+    'Plan A 原圖成功', '⚠️ 字型異常警告', 'Plan B 切片成功',
+    'Plan C Grok 備援', '異常 / 放棄',
 ]
 
 
@@ -469,6 +469,15 @@ class BatchQueuePanel(Widget):
                 item.setData(ROLE_OCR_STATS, stats)
                 break
         self.folderList.viewport().update()
+
+    def getOcrStats(self, folder: str) -> dict:
+        """取得特定資料夾的 OCR 統計數據 (供 mainwindow 調用判定是否異常)"""
+        folder = osp.normpath(folder)
+        for i in range(self.folderList.count()):
+            item = self.folderList.item(i)
+            if osp.normpath(item.data(ROLE_PATH)) == folder:
+                return item.data(ROLE_OCR_STATS) or {}
+        return {}
 
     def setRunning(self, running: bool):
         self.addBtn.setEnabled(not running)

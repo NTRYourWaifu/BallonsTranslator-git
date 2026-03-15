@@ -760,14 +760,14 @@ class ModuleManager(QObject):
         self.check_inpaint_fin_timer.stop()
         self.inpaint_th_finished.emit()
 
-    def runImgtransPipeline(self, start_from: str = None):
+    def runImgtransPipeline(self, start_from: str = None, reset_stats: bool = True):
         if self.imgtrans_proj.is_empty:
             LOGGER.info('proj file is empty, nothing to do')
             self.progress_msgbox.hide()
             return
         self.last_finished_index = -1
         self.terminateRunningThread()
-        if self.ocr_stats_bar is not None:
+        if reset_stats and self.ocr_stats_bar is not None:
             self.ocr_stats_bar.reset()
         
         if cfg_module.all_stages_disabled() and self.imgtrans_proj is not None and self.imgtrans_proj.num_pages > 0:
@@ -806,14 +806,16 @@ class ModuleManager(QObject):
 
     def resumeFromCurrentPage(self, current_imgname: str):
         """從當前觀看頁面繼續"""
-        self.runImgtransPipeline(start_from=current_imgname)
+        self.runImgtransPipeline(start_from=current_imgname, reset_stats=False)
 
     def resumeFromLastStopped(self):
         """繼續上一次停止的位置"""
         last = self.imgtrans_thread.last_stopped_imgname
         if last is None:
             LOGGER.warning('沒有上一次停止的紀錄，從頭開始')
-        self.runImgtransPipeline(start_from=last)
+            self.runImgtransPipeline(start_from=last, reset_stats=True)
+        else:
+            self.runImgtransPipeline(start_from=last, reset_stats=False)
 
     def runBlktransPipeline(self, blk_list: List[TextBlock], tgt_img: np.ndarray, mode: int, blk_ids: List[int], tgt_mask):
         self.terminateRunningThread()
@@ -848,7 +850,7 @@ class ModuleManager(QObject):
             shared.pbar['detect'].update(1)
         progress = int(progress / self.imgtrans_thread.num_pages * 100)
         self.progress_msgbox.updateDetectProgress(progress)
-        if ri != self.last_finished_index:
+        if ri >= 0 and ri != self.last_finished_index:
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
         if progress == 100:
@@ -860,7 +862,7 @@ class ModuleManager(QObject):
             shared.pbar['ocr'].update(1)
         progress = int(progress / self.imgtrans_thread.num_pages * 100)
         self.progress_msgbox.updateOCRProgress(progress)
-        if ri != self.last_finished_index:
+        if ri >= 0 and ri != self.last_finished_index:
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
         if progress == 100:
@@ -872,7 +874,7 @@ class ModuleManager(QObject):
             shared.pbar['translate'].update(1)
         progress = int(progress / self.imgtrans_thread.num_pages * 100)
         self.progress_msgbox.updateTranslateProgress(progress)
-        if ri != self.last_finished_index:
+        if ri >= 0 and ri != self.last_finished_index:
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
         if progress == 100:
@@ -884,7 +886,7 @@ class ModuleManager(QObject):
             shared.pbar['inpaint'].update(1)
         progress = int(progress / self.imgtrans_thread.num_pages * 100)
         self.progress_msgbox.updateInpaintProgress(progress)
-        if ri != self.last_finished_index:
+        if ri >= 0 and ri != self.last_finished_index:
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
         if progress == 100:
@@ -915,13 +917,15 @@ class ModuleManager(QObject):
         if self.proj_finished():
             self.progress_msgbox.hide()
             self.imgtrans_pipeline_finished.emit()
-            try:
-                import winsound, os.path as osp
-                sfx_path = osp.abspath('data/sfx/finish.wav')
-                if osp.exists(sfx_path):
-                    winsound.PlaySound(sfx_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            except Exception:
-                pass
+
+    def play_finish_sound(self):
+        try:
+            import winsound, os.path as osp
+            sfx_path = osp.abspath('data/sfx/finish.wav')
+            if osp.exists(sfx_path):
+                winsound.PlaySound(sfx_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            pass
 
     def setTranslator(self, translator: str = None):
         if translator is None:
