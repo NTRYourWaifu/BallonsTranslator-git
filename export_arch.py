@@ -43,7 +43,12 @@ FILES = [
     "ui/config_proj.py",
     "ui/funcmaps.py",
     "ui/batch_queue_panel.py",
+    "ui/textitem.py",
+    "ui/scene_textlayout.py",
     "ui/custom_widget/ocr_stats_bar.py",
+    "ui/scenetext_manager.py",
+
+
 
 
     # 入口

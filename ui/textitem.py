@@ -17,6 +17,59 @@ TEXTRECT_SHOW_COLOR = QColor(30, 147, 229, 170)
 TEXTRECT_SELECTED_COLOR = QColor(248, 64, 147, 170)
 
 
+def calc_font_size_by_render(blk: TextBlock) -> float:
+    """
+    用 offscreen 渲染二分搜尋，找出讓譯文剛好填入 YOLO 框的最大字體大小（pt）。
+    若框面積為 0 或譯文為空，回傳 blk.fontformat.font_size（維持原值）。
+    """
+    translation = blk.translation
+    if not translation or not translation.strip():
+        return blk.fontformat.font_size
+
+    rect = blk.bounding_rect()  # [x, y, w, h]
+    blk_w, blk_h = float(rect[2]), float(rect[3])
+    target_area = blk_w * blk_h
+    if target_area <= 0:
+        return blk.fontformat.font_size
+
+    ffmt = blk.fontformat
+
+    # 建立 offscreen document + layout，不加入任何 scene
+    doc = QTextDocument()
+    doc.setDocumentMargin(0)
+    if ffmt.vertical:
+        layout = VerticalTextDocumentLayout(doc, ffmt)
+    else:
+        layout = HorizontalTextDocumentLayout(doc, ffmt)
+    doc.setDocumentLayout(layout)
+    stroke_pad = pt2px(ffmt.font_size) * ffmt.stroke_width
+    layout.setMaxSize(blk_w + stroke_pad, blk_h + stroke_pad, relayout=False)
+
+
+    def _render(pt_size: float):
+        doc.setPlainText(translation)
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+        cfmt = QTextCharFormat()
+        cfmt.setFontPointSize(pt_size)
+        cursor.setCharFormat(cfmt)
+        layout.setMaxSize(blk_w, blk_h, relayout=False)
+        layout.reLayout()
+        return layout.max_width, layout.max_height
+
+    step = 0.5
+    best = 8.0
+    pt = 8.0
+    while pt <= 250.0:
+        mw, mh = _render(pt)
+        if mw > blk_w + 0.1 or mh > blk_h + 0.1:
+            break
+        best = pt
+        pt += step
+
+    return pt2px(best)
+
+
 class TextBlkItem(QGraphicsTextItem):
 
     begin_edit = Signal(int)
@@ -818,6 +871,26 @@ class TextBlkItem(QGraphicsTextItem):
         self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
         if repaint_background:
             self.update()
+
+        # ── [TRACE-SW] stroke 設完後，layout 的最終狀態 ──
+        if not self.blk.vertical:
+            from utils.logger import logger as _LOGGER
+            doc = self.document()
+            total_lines = 0
+            block = doc.firstBlock()
+            while block.isValid():
+                total_lines += block.layout().lineCount()
+                block = block.next()
+            pad = self.padding()
+            br = self.absBoundingRect()  # [x, y, w, h]
+            _LOGGER.debug(
+                f"[TRACE-SW] idx={self.idx} vert=False xyxy={self.blk.xyxy} "
+                f"fs_px={self.blk.font_size:.1f} sw={stroke_width:.2f} "
+                f"padding={pad:.1f} item_wh={br[2]}x{br[3]} "
+                f"shrink={self.layout.shrink_width:.1f}x{self.layout.shrink_height:.1f} "
+                f"line_count={total_lines} "
+                f"trans={self.blk.translation!r}"
+            )
 
     def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
         '''

@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from qtpy.QtCore import Signal, QObject
 
 from .base import register_OCR, OCRBase, TextBlock
+from utils.textblock import resolve_blk_style
 
 
 # ── 統計事件類型 ──────────────────────────────────────────────
@@ -116,10 +117,8 @@ class OCRLlm(OCRBase):
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_ratio': {'value': '0.8', 'description': '字體大小係數（0.5~1.2）'},
-        'debug_log': {'type': 'checkbox', 'value': False,
-                      'description': '輸出 OCR 流程 log（Plan A/B/C 結果、解析失敗等）'},
-        'debug_font_log': {'type': 'checkbox', 'value': False,
-                           'description': '輸出每框字型推算過程（原文行數、fs 計算路徑）'},
+        'save_grid_debug': {'type': 'checkbox', 'value': False,
+                            'description': '將每頁送給 LLM 的 grid 拼圖存到專案目錄下的 ocr_debug/ 資料夾'},
         'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
         'fallback_model':   {'value': 'grok-4.20-beta-0309-non-reasoning',
                              'description': '備援模型，需支援 vision'},
@@ -175,10 +174,8 @@ class OCRLlm(OCRBase):
         try: return float(self.params['font_size_ratio']['value'])
         except: return 0.8
     @property
-    def debug_log(self) -> bool: return bool(self.params['debug_log']['value'])
-    @property
-    def debug_font_log(self) -> bool:
-        return bool(self.params.get('debug_font_log', {}).get('value', False))
+    def save_grid_debug(self) -> bool:
+        return bool(self.params.get('save_grid_debug', {}).get('value', False))
     @property
     def fallback_api_key(self) -> str:  return self.params['fallback_api_key']['value']
     @property
@@ -242,108 +239,6 @@ class OCRLlm(OCRBase):
             total += math.ceil(seg_len / chars_per_line)
         return max(total, 1)
 
-    def _calc_fs_from_source(self, blk: TextBlock, src_text: str) -> float:
-        """
-        用 OCR 原文（日文）推算合理字型大小。
-
-        步驟：
-          1. 以 _detected_font_size 為初始 fs 猜測值
-             若無則用框的短邊 / 2 當起點
-          2. 迭代兩輪：
-             用 fs 算出行/欄數 → 用行/欄數反推 fs
-          3. 乘以 font_size_ratio 回傳
-
-        橫排：主軸 = box_w，副軸 = box_h，fs = box_h / 行數
-        直排：主軸 = box_h，副軸 = box_w，fs = box_w / 欄數
-        """
-        x1, y1, x2, y2 = blk.xyxy
-        box_w = max(x2 - x1, 1)
-        box_h = max(y2 - y1, 1)
-        orig_w = getattr(blk, '_detected_font_size', 0)
-
-        if blk.vertical:
-            main_axis  = box_h   # 每欄沿 Y 方向延伸
-            cross_axis = box_w   # 欄數沿 X 方向
-        else:
-            main_axis  = box_w   # 每行沿 X 方向延伸
-            cross_axis = box_h   # 行數沿 Y 方向
-
-        # 初始 fs 猜測
-        if 0 < orig_w < cross_axis * 0.95:
-            fs_guess = orig_w
-        else:
-            fs_guess = cross_axis / 2.0
-
-        # 迭代兩輪收斂
-        fs = fs_guess
-        for _ in range(2):
-            n = self._count_lines(src_text, fs, main_axis)
-            fs = cross_axis / n
-
-        return max(8.0, min(250.0, fs * self.font_size_ratio))
-
-    def _auto_font_size(self, blk: TextBlock, text: str = '') -> float:
-        """
-        計算字型大小。
-
-        優先使用 _calc_fs_from_source（原文反推），
-        fallback 到舊的面積開根號估算。
-        """
-        x1, y1, x2, y2 = blk.xyxy
-        box_w = max(x2 - x1, 1)
-        box_h = max(y2 - y1, 1)
-        orig_w = getattr(blk, '_detected_font_size', 0)
-
-        # 有原文 → 用原文行數反推（B-1 新邏輯）
-        if text:
-            return self._calc_fs_from_source(blk, text)
-
-        # 無原文 fallback：沿用舊邏輯
-        # （_detected_font_size 可信時直接用，否則面積開根號估算）
-        if 0 < orig_w < box_w * 0.8:
-            return max(8.0, min(250.0, orig_w * self.font_size_ratio))
-
-        return max(8.0, min(250.0,
-            math.sqrt(box_w * box_h) / 4 * self.font_size_ratio
-        ))
-
-    def _apply_font_size(self, blk: TextBlock, text: str = ''):
-        orig_w = getattr(blk, '_detected_font_size', 0)
-        fs = self._auto_font_size(blk, text)
-        x1, y1, x2, y2 = blk.xyxy
-        box_w = x2 - x1
-        box_h = y2 - y1
-
-        is_abnormal = fs < 12.0 or fs > 65.0
-
-        if is_abnormal:
-            self.logger.warning(
-                f"⚠️字型異常: fs={fs:.1f} "
-                f"(orig_w={orig_w:.1f}, box={box_w}x{box_h}, "
-                f"vert={blk.vertical}) | text={text[:12]!r}"
-            )
-            self._emit(OcrEventType.FONT_WARN)
-
-        if self.debug_font_log:
-            # 重新跑一次 _count_lines 拿行數，僅供 log 顯示用
-            if text and blk.vertical:
-                n = self._count_lines(text, fs / self.font_size_ratio, box_h)
-                axis_info = f"box_h={box_h} → {n}欄 → fs={box_w/n:.1f}"
-            elif text:
-                n = self._count_lines(text, fs / self.font_size_ratio, box_w)
-                axis_info = f"box_w={box_w} → {n}行 → fs={box_h/n:.1f}"
-            else:
-                axis_info = 'no_text→fallback'
-            path = 'src→lines' if text else ('orig_w' if 0 < orig_w < box_w * 0.8 else 'fallback')
-            self.logger.debug(
-                f"[font] {path} | orig_w={orig_w:.1f} {axis_info}"
-                f" ×ratio={self.font_size_ratio} → fs={fs:.1f}"
-                f" {'⚠️' if is_abnormal else '✓'}"
-                f" | vert={blk.vertical} xyxy={blk.xyxy}"
-                f" | text={text[:12]!r}"
-            )
-
-        blk.font_size = fs
 
     # ── 底層 API 呼叫 ─────────────────────────────────────────
     @staticmethod
@@ -444,13 +339,18 @@ class OCRLlm(OCRBase):
                 blk = blk_list[idx]
                 blk.text = [item['original']]
                 blk.translation = item.get('translation', '')
+
+                # 確保 obs 是物件而不是 dict
+                if isinstance(blk.obs, dict):
+                    from utils.textblock import RawObservations
+                    blk.obs = RawObservations(**{k: v for k, v in blk.obs.items() if k in RawObservations.__dataclass_fields__})
+
                 llm_dir = item.get('direction', '').lower()
                 if llm_dir == 'v':
-                    blk.vertical = True
+                    blk.obs.ocr_says_vertical = True
                 elif llm_dir == 'h':
-                    blk.vertical = False
-                    
-                self._apply_font_size(blk, item['original'])
+                    blk.obs.ocr_says_vertical = False
+                blk.obs.ocr_src_text = item['original']
                 matched += 1
 
             return matched > 0
@@ -559,15 +459,13 @@ class OCRLlm(OCRBase):
 
         img_dir = self.current_img_dir or os.path.dirname(self.current_imgname) or '.'
         img_name = os.path.basename(self.current_imgname) or 'unknown'
-        
-        debug_dir = os.path.join(img_dir, 'ocr_debug')
-        os.makedirs(debug_dir, exist_ok=True)
-        
-        file_stem = os.path.splitext(img_name)[0]
-        safe_name = f"{file_stem}_grid.jpg"
-        debug_path = os.path.join(debug_dir, safe_name)
-        
-        cv2.imwrite(debug_path, canvas)
+
+        if self.save_grid_debug:
+            debug_dir = os.path.join(img_dir, 'ocr_debug')
+            os.makedirs(debug_dir, exist_ok=True)
+            file_stem = os.path.splitext(img_name)[0]
+            debug_path = os.path.join(debug_dir, f"{file_stem}_grid.jpg")
+            cv2.imwrite(debug_path, canvas)
 
         return canvas, visual_order
 
@@ -625,7 +523,7 @@ class OCRLlm(OCRBase):
             if isinstance(data, dict) and data.get('original'):
                 blk.text = [data['original']]
                 blk.translation = data.get('translation', '')
-                self._apply_font_size(blk, data['original'])
+                blk.obs.ocr_src_text = data['original']
                 self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK)
                 return idx, blk
         except Exception as e:
@@ -756,6 +654,8 @@ class OCRLlm(OCRBase):
         if result == 'ok':
             self._emit(OcrEventType.PLAN_A_OK)
             self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
+            for blk in blk_list:
+                resolve_blk_style(blk, self.font_size_ratio)
             return
         self.logger.warning(f"{lp} Plan A：{result}")
 
@@ -765,6 +665,8 @@ class OCRLlm(OCRBase):
             total = ok + fail
             if fail == 0:
                 self.logger.success(f"{lp} Plan B 成功（{ok}/{total} 框）")
+                for blk in blk_list:
+                    resolve_blk_style(blk, self.font_size_ratio)
                 return
             else:
                 self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")
@@ -790,7 +692,7 @@ class OCRLlm(OCRBase):
                     if isinstance(data, dict) and data.get('original'):
                         blk.text = [data['original']]
                         blk.translation = data.get('translation', '')
-                        self._apply_font_size(blk, data['original'])
+                        blk.obs.ocr_src_text = data['original']
                         self._emit(OcrEventType.GROK_OK)
                         ok += 1
                         continue
@@ -800,6 +702,8 @@ class OCRLlm(OCRBase):
                 blk.translation = '●●●'
                 fail += 1
                 self._emit(OcrEventType.ERROR)
+            for blk in blk_list:
+                resolve_blk_style(blk, self.font_size_ratio)
             if fail == 0:
                 self.logger.success(f"{lp} Plan C 成功（{ok}/{len(failed_indices)} 框）")
             else:
@@ -809,6 +713,11 @@ class OCRLlm(OCRBase):
         for i in failed_indices:
             blk_list[i].text = ['●●●']
             blk_list[i].translation = '●●●'
+        for blk in blk_list:
+            resolve_blk_style(blk, self.font_size_ratio)
+            if blk.translation and blk.translation.strip() != '●●●':
+                from ui.textitem import calc_font_size_by_render
+                blk.font_size = calc_font_size_by_render(blk)
         self.logger.error(f"{lp} 所有方案失敗，此頁放棄")
         self._emit(OcrEventType.ERROR)
 

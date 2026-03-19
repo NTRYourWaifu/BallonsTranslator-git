@@ -57,15 +57,15 @@ class DetectorYOLOv8(TextDetectorBase):
             )
         },
         # ─────────────────────────────────────────────────────
-        'debug_log': {
+        'det_debug_log': {
             'type': 'checkbox',
             'value': False,
-            'description': '輸出偵測結果 log + debug 圖（最終框列表）'
+            'description': '輸出偵測流程 log 並將最終框列表存成 det_debug_*.jpg'
         },
-        'debug_log_verbose': {
+        'det_debug_verbose': {
             'type': 'checkbox',
             'value': False,
-            'description': '輸出 CTD×YOLO 每對比對的詳細 overlap 數值（需同時開 debug_log）'
+            'description': 'CTD×YOLO 每對比對的詳細 overlap 數值（需同時開 det_debug_log）'
         },
     }
 
@@ -133,15 +133,15 @@ class DetectorYOLOv8(TextDetectorBase):
             return 0.3
 
     @property
-    def debug_log(self) -> bool:
-        val = self.params['debug_log']['value']
+    def det_debug_log(self) -> bool:
+        val = self.params['det_debug_log']['value']
         if isinstance(val, bool):
             return val
         return bool(val)
 
     @property
-    def debug_log_verbose(self) -> bool:
-        val = self.params.get('debug_log_verbose', {}).get('value', False)
+    def det_debug_verbose(self) -> bool:
+        val = self.params.get('det_debug_verbose', {}).get('value', False)
         if isinstance(val, bool):
             return val
         return bool(val)
@@ -320,7 +320,7 @@ class DetectorYOLOv8(TextDetectorBase):
                     keep[i] = False
                     break
         removed = keep.count(False)
-        if self.debug_log and removed:
+        if self.det_debug_log and removed:
             self.logger.debug(f"YOLO 包含框清理：移除 {removed} 個被包含的小框")
         return [b for b, k in zip(boxes5, keep) if k]
 
@@ -366,7 +366,7 @@ class DetectorYOLOv8(TextDetectorBase):
                 cov = self._yolo_covered_by_ctd(yb.xyxy, ctd_blk.xyxy)
                 if ov >= threshold or cov >= threshold:
                     overlapping.append((i, yb))
-                if self.debug_log and self.debug_log_verbose:
+                if self.det_debug_log and self.det_debug_verbose:
                     self.logger.debug(
                         f"  CTD{ctd_blk.xyxy}(vert={ctd_blk.vertical})"
                         f" vs YOLO{yb.xyxy}"
@@ -390,7 +390,7 @@ class DetectorYOLOv8(TextDetectorBase):
             area_says_hori = area_ratio >= area_ratio_thresh
 
             # ── A-2 異常警告：vertical 與面積比推斷不一致 ────
-            # 永遠 log（不限 debug_log），方便排查偵測品質問題
+            # 永遠 log（不限 det_debug_log），方便排查偵測品質問題
             if ctd_is_hori != area_says_hori:
                 self.logger.warning(
                     f"[det 方向異常] CTD.vertical={ctd_blk.vertical} "
@@ -424,16 +424,18 @@ class DetectorYOLOv8(TextDetectorBase):
         for action, ctd_blk, yolo_idx in actions:
             if action == 'add':
                 ctd_blk.det_model = 'ctd_supplement'
+                ctd_blk.obs.ctd_says_vertical = ctd_blk.vertical
                 result.append(ctd_blk)
                 n_add += 1
             elif action == 'replace':
                 ctd_blk.det_model = 'ctd_replace'
+                ctd_blk.obs.ctd_says_vertical = ctd_blk.vertical
                 result.append(ctd_blk)
                 n_replace += 1
             else:
                 n_drop += 1
 
-        if self.debug_log:
+        if self.det_debug_log:
             self.logger.debug(
                 f"CTD 合併：補入={n_add} 取代={n_replace} 捨棄={n_drop} "
                 f"| 最終={len(result)} 框"
@@ -469,23 +471,24 @@ class DetectorYOLOv8(TextDetectorBase):
                 blk.vertical        = True
                 blk.src_is_vertical = True
                 blk.angle           = 0
-                # 直排：欄寬 ≈ 字寬
-                blk._detected_font_size = float(orig_w)
+                blk.obs.yolo_says_vertical = True
             else:
                 is_vertical = (y2 - y1) >= (x2 - x1)
                 blk.vertical        = is_vertical
                 blk.src_is_vertical = is_vertical
                 if not is_vertical:
                     blk.angle = 0
-                # 直排用欄寬，橫排用框高（框高 ≈ 字高，通常無跨行合併）
-                blk._detected_font_size = float(orig_w) if is_vertical else float(y2 - y1)
+                blk.obs.yolo_says_vertical = is_vertical
 
-            if self.debug_log:
+            blk.obs.yolo_col_width = float(orig_w)
+            blk.obs.yolo_box_w     = float(x2 - x1)
+            blk.obs.yolo_box_h     = float(y2 - y1)
+
+            if self.det_debug_log:
                 self.logger.debug(
                     f"YOLO box=({x1},{y1},{x2},{y2}) "
                     f"merged_w={x2-x1} orig_w={orig_w} "
                     f"vert={blk.vertical} "
-                    f"det_fs={blk._detected_font_size:.1f}"
                 )
 
             blk_list.append(blk)
@@ -527,7 +530,7 @@ class DetectorYOLOv8(TextDetectorBase):
         # mask 取聯集（CTD 的精確 mask 比 YOLO 矩形填充更準確）
         merged_mask = np.maximum(yolo_mask, _ctd_mask)
 
-        if self.debug_log:
+        if self.det_debug_log:
             self.logger.debug(
                 f"偵測完成：YOLO={len(yolo_blks)} CTD={len(ctd_blks)} "
                 f"合併後={len(merged_blks)}"
@@ -546,7 +549,7 @@ class DetectorYOLOv8(TextDetectorBase):
         merged_blks: List[TextBlock],
     ):
         """
-        debug_log 開啟時，把三層結果畫在原圖上並存到 logs/det_debug_*.jpg。
+        det_debug_log 開啟時，把三層結果畫在原圖上並存到 logs/det_debug_*.jpg。
 
         顏色規則：
           藍框  = YOLO 原始結果（合併後）

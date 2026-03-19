@@ -1028,7 +1028,11 @@ class MainWindow(mainwindow_cls):
             ffmt_list: List[FontFormat] = self.backup_blkstyles[page_index]
 
         self.postprocess_translations(blk_list)
-                
+
+        from utils.logger import logger as _LOGGER
+        for _ii, _blk in enumerate(blk_list):
+            _LOGGER.debug(f"[TRACE-2A] blk[{_ii}] vert={_blk.vertical} xyxy={_blk.xyxy} fs={_blk.font_size:.1f} sw={_blk.stroke_width:.2f} trans={_blk.translation!r}")
+
         # override font format if necessary
         override_fnt_size = pcfg.let_fntsize_flag == 1
         override_fnt_stroke = pcfg.let_fntstroke_flag == 1
@@ -1086,9 +1090,19 @@ class MainWindow(mainwindow_cls):
                     if sw > 0 and pcfg.module.enable_ocr and pcfg.module.enable_detect and not override_fnt_size:
                         blk.font_size = blk.font_size / (1 + sw)
 
+                    # stroke_width 縮減後，用 render 算最終字體大小
+                    if not override_fnt_size and blk.translation and blk.translation.strip() not in ('', '●●●'):
+                        from ui.textitem import calc_font_size_by_render
+                        _fs_before = blk.font_size
+                        blk.font_size = calc_font_size_by_render(blk)
+                        _LOGGER.debug(f"[TRACE-2B] blk[{ii}] vert={blk.vertical} xyxy={blk.xyxy} fs {_fs_before:.1f}→{blk.font_size:.1f} sw={blk.stroke_width:.2f}")
+
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (pcfg.module.enable_detect or pcfg.module.enable_translate)
-        
+
+        for _ii, _blk in enumerate(blk_list):
+            _LOGGER.debug(f"[TRACE-2C] blk[{_ii}] vert={_blk.vertical} xyxy={_blk.xyxy} fs={_blk.font_size:.1f} sw={_blk.stroke_width:.2f}")
+
         if page_index != self.pageList.currentIndex().row():
             self.pageList.setCurrentRow(page_index)
         else:

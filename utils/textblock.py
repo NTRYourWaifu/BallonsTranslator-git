@@ -55,6 +55,31 @@ def sort_pnts(pts: np.ndarray):
 
 
 @nested_dataclass
+class RawObservations:
+    """
+    各偵測階段的原始觀測值。
+    每個階段只負責填入自己量到的數據，不做推斷。
+    最終由 resolve_blk_style() 統一計算。
+    """
+    # ── YOLO 階段填入 ──────────────────────────────
+    yolo_col_width: float = -1.0      # orig_w，合併前單欄的物理寬度（像素）
+    yolo_box_w: float = -1.0          # 偵測框寬度
+    yolo_box_h: float = -1.0          # 偵測框高度
+    yolo_says_vertical: bool = None   # YOLO 自身的方向判斷
+
+    # ── CTD 階段填入 ───────────────────────────────
+    ctd_says_vertical: bool = None    # CTD 模型的方向判斷（比 YOLO 更可信）
+
+    # ── examine_textblk 階段填入 ───────────────────
+    geo_norm_v: float = -1.0          # 所有文字行垂直向量的總長（原始值）
+    geo_norm_h: float = -1.0          # 所有文字行水平向量的總長（原始值）
+    geo_line_count: int = -1          # 幾何上偵測到的行/欄數
+
+    # ── OCR 階段填入 ───────────────────────────────
+    ocr_src_text: str = ''            # OCR 識別出的原文完整字串
+    ocr_says_vertical: bool = None    # LLM 回傳的 direction 欄位判斷
+
+@nested_dataclass
 class TextBlock:
     xyxy: List = field(default_factory = lambda: [0, 0, 0, 0])
     lines: List = field(default_factory = lambda: [])
@@ -77,6 +102,21 @@ class TextBlock:
     region_inpaint_dict: Dict = None
 
     fontformat: FontFormat = field(default_factory=lambda: FontFormat())
+    _obs: RawObservations = field(default_factory=lambda: RawObservations())
+
+    @property
+    def obs(self) -> RawObservations:
+        return self._obs
+
+    @obs.setter
+    def obs(self, value: Union[RawObservations, Dict]):
+        if isinstance(value, dict):
+            # 過濾掉不在 dataclass 定義中的鍵，避免解包報錯
+            valid_keys = RawObservations.__dataclass_fields__.keys()
+            filtered = {k: v for k, v in value.items() if k in valid_keys}
+            self._obs = RawObservations(**filtered)
+        else:
+            self._obs = value
 
     deprecated_attributes: dict = field(default_factory = lambda: dict())
 
@@ -225,6 +265,8 @@ class TextBlock:
         self.fontformat.alignment = value
 
     def __post_init__(self):
+        if isinstance(self.obs, dict):
+            self.obs = RawObservations(**{k: v for k, v in self.obs.items() if k in RawObservations.__dataclass_fields__})
         if self.xyxy is not None:
             self.xyxy = [int(num) for num in self.xyxy]
         if self.distance is not None:
@@ -384,9 +426,11 @@ class TextBlock:
         return self.lines[idx]
 
     def to_dict(self, deep_copy=False):
-        blk_dict = vars(self)
+        blk_dict = vars(self).copy()
         if deep_copy:
             blk_dict = copy.deepcopy(blk_dict)
+        if 'obs' in blk_dict and not isinstance(blk_dict['obs'], dict):
+            blk_dict['obs'] = vars(blk_dict['obs'])
         return blk_dict
 
     def get_transformed_region(self, img: np.ndarray, idx: int, textheight: int, maxwidth: int = None) -> np.ndarray :
@@ -614,12 +658,15 @@ def examine_textblk(blk: TextBlock, im_w: int, im_h: int, sort: bool = False) ->
     # calcuate distance between textlines and origin 
     if vertical:
         primary_vec, primary_norm = v, norm_v
-        distance_vectors = center_pnts - np.array([[im_w, 0]], dtype=np.float64)   # vertical manga text is read from right to left, so origin is (imw, 0)
-        font_size = int(round(norm_h / len(lines)))
+        distance_vectors = center_pnts - np.array([[im_w, 0]], dtype=np.float64)
     else:
         primary_vec, primary_norm = h, norm_h
         distance_vectors = center_pnts - np.array([[0, 0]], dtype=np.float64)
-        font_size = int(round(norm_v / len(lines)))
+
+    # 填入原始觀測值，不在此計算 font_size
+    blk.obs.geo_norm_v = float(norm_v)
+    blk.obs.geo_norm_h = float(norm_h)
+    blk.obs.geo_line_count = len(lines)
     
     rotation_angle = int(math.atan2(primary_vec[1], primary_vec[0]) / math.pi * 180)     # rotation angle of textlines
     distance = np.linalg.norm(distance_vectors, axis=1)     # distance between textlinecenters and origin
@@ -632,19 +679,86 @@ def examine_textblk(blk: TextBlock, im_w: int, im_h: int, sort: bool = False) ->
         blk.angle -= 90
     if abs(blk.angle) < 3:
         blk.angle = 0
-    blk.font_size = font_size
     blk.vertical = blk.src_is_vertical = vertical
     blk.vec = primary_vec
     blk.norm = primary_norm
     if sort:
         blk.sort_lines()
 
+def resolve_blk_style(blk: TextBlock, font_size_ratio: float = 1.0) -> None:
+    """
+    pipeline 末端唯一的計算點。
+    讀取 blk.obs 裡所有原始觀測值，統一決定 vertical 和 font_size。
+    """
+    if isinstance(blk.obs, dict):
+        blk.obs = RawObservations(**blk.obs)
+    obs = blk.obs
+    x1, y1, x2, y2 = blk.xyxy
+    box_w = max(x2 - x1, 1)
+    box_h = max(y2 - y1, 1)
+
+    # ══ 1. 決定方向（優先序：OCR > CTD > 幾何） ══
+    if obs.ocr_says_vertical is not None:
+        blk.vertical = obs.ocr_says_vertical
+    elif obs.ctd_says_vertical is not None:
+        blk.vertical = obs.ctd_says_vertical
+    elif obs.geo_norm_v > 0 and obs.geo_norm_h > 0:
+        if blk.language == 'ja':
+            blk.vertical = obs.geo_norm_v > obs.geo_norm_h
+        else:
+            blk.vertical = obs.geo_norm_v > obs.geo_norm_h * 2
+    # else: 維持 YOLO 當初設的 blk.vertical
+
+    # ══ 2. 決定字型大小 ══
+    cross_axis = box_w if blk.vertical else box_h
+
+    if obs.ocr_src_text and obs.geo_line_count > 0:
+        # 最佳路徑：原文 + 幾何行數，直接除
+        blk.font_size = (cross_axis / obs.geo_line_count) * font_size_ratio
+
+    elif obs.ocr_src_text:
+        # 有原文但沒幾何行數，迭代推算
+        main_axis = box_h if blk.vertical else box_w
+        fs_guess = obs.yolo_col_width if 0 < obs.yolo_col_width < cross_axis * 0.95 else cross_axis / 2.0
+        fs = fs_guess
+        for _ in range(2):
+            if fs <= 0:
+                break
+            chars_per_line = max(1, int(main_axis / fs))
+            import math, re
+            lines_seg = obs.ocr_src_text.split('\n')
+            n = sum(math.ceil(max(len(re.sub(r'\s', '', s)), 1) / chars_per_line) for s in lines_seg)
+            n = max(n, 1)
+            fs = cross_axis / n
+        blk.font_size = max(8.0, min(250.0, fs * font_size_ratio))
+
+    elif obs.geo_line_count > 0 and obs.geo_norm_v > 0 and obs.geo_norm_h > 0:
+        # 只有幾何，用 norm / line_count
+        raw = (obs.geo_norm_h if blk.vertical else obs.geo_norm_v) / obs.geo_line_count
+        blk.font_size = max(8.0, min(250.0, raw * font_size_ratio))
+
+    elif obs.yolo_col_width > 0:
+        # 最終 fallback：YOLO 欄寬
+        blk.font_size = max(8.0, min(250.0, obs.yolo_col_width * font_size_ratio))
+
 def try_merge_textline(blk: TextBlock, blk2: TextBlock, fntsize_tol=1.7, distance_tol=2) -> bool:
     if blk2.merged:
         return False
-    fntsize_div = blk.font_size / blk2.font_size
+
+    def _geo_font_size(b: TextBlock) -> float:
+        """從幾何觀測值估算字型大小，供合併判斷使用。"""
+        lc = b.obs.geo_line_count if b.obs.geo_line_count > 0 else 1
+        if b.vertical and b.obs.geo_norm_h > 0:
+            return b.obs.geo_norm_h / lc
+        if not b.vertical and b.obs.geo_norm_v > 0:
+            return b.obs.geo_norm_v / lc
+        return b.font_size  # 最終 fallback
+
+    fs1 = _geo_font_size(blk)
+    fs2 = _geo_font_size(blk2)
+    fntsize_div = fs1 / fs2 if fs2 > 0 else 1.0
     num_l1, num_l2 = len(blk), len(blk2)
-    fntsz_avg = (blk.font_size * num_l1 + blk2.font_size * num_l2) / (num_l1 + num_l2)
+    fntsz_avg = (fs1 * num_l1 + fs2 * num_l2) / (num_l1 + num_l2)
     vec_prod = blk.vec @ blk2.vec
     vec_sum = blk.vec + blk2.vec
     cos_vec = vec_prod / blk.norm / blk2.norm
@@ -668,7 +782,7 @@ def try_merge_textline(blk: TextBlock, blk2: TextBlock, fntsize_tol=1.7, distanc
         blk.angle -= 90
     blk.norm = np.linalg.norm(vec_sum)
     blk.distance = np.append(blk.distance, blk2.distance[-1])
-    blk.font_size = fntsz_avg
+    blk.obs.geo_line_count = len(blk.lines)  # 合併後行數更新
     blk2.merged = True
     return True
 
