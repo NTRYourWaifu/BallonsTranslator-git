@@ -1029,10 +1029,6 @@ class MainWindow(mainwindow_cls):
 
         self.postprocess_translations(blk_list)
 
-        from utils.logger import logger as _LOGGER
-        for _ii, _blk in enumerate(blk_list):
-            _LOGGER.debug(f"[TRACE-2A] blk[{_ii}] vert={_blk.vertical} xyxy={_blk.xyxy} fs={_blk.font_size:.1f} sw={_blk.stroke_width:.2f} trans={_blk.translation!r}")
-
         # override font format if necessary
         override_fnt_size = pcfg.let_fntsize_flag == 1
         override_fnt_stroke = pcfg.let_fntstroke_flag == 1
@@ -1093,14 +1089,9 @@ class MainWindow(mainwindow_cls):
                     # stroke_width 縮減後，用 render 算最終字體大小
                     if not override_fnt_size and blk.translation and blk.translation.strip() not in ('', '●●●'):
                         from ui.textitem import calc_font_size_by_render
-                        _fs_before = blk.font_size
                         blk.font_size = calc_font_size_by_render(blk)
-                        _LOGGER.debug(f"[TRACE-2B] blk[{ii}] vert={blk.vertical} xyxy={blk.xyxy} fs {_fs_before:.1f}→{blk.font_size:.1f} sw={blk.stroke_width:.2f}")
 
             self.st_manager.auto_textlayout_flag = False
-
-        for _ii, _blk in enumerate(blk_list):
-            _LOGGER.debug(f"[TRACE-2C] blk[{_ii}] vert={_blk.vertical} xyxy={_blk.xyxy} fs={_blk.font_size:.1f} sw={_blk.stroke_width:.2f}")
 
         if page_index != self.pageList.currentIndex().row():
             self.pageList.setCurrentRow(page_index)

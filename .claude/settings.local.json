@@ -4,7 +4,9 @@
       "Bash(python -c \"import json; d=json.load\\(open\\(''config/config.json'', encoding=''utf-8''\\)\\); td=d.get\\(''textdetector'', {}\\); print\\(json.dumps\\(td, indent=2, ensure_ascii=False\\)\\)\")",
       "Bash(python -c \"import json; d=json.load\\(open\\(''config/config.json'', encoding=''utf-8''\\)\\); print\\(list\\(d.keys\\(\\)\\)\\)\")",
       "Bash(python3 -c \":*)",
-      "Bash(ls -la \"f:/BallonsTranslator-git/modules/textdetector/__pycache__/detector_yolov8\"*.pyc)"
+      "Bash(ls -la \"f:/BallonsTranslator-git/modules/textdetector/__pycache__/detector_yolov8\"*.pyc)",
+      "Bash(find f:/BallonsTranslator-git/ui -name \"*.pyc\" -delete)",
+      "Bash(find f:/BallonsTranslator-git/ui -name \"__pycache__\" -type d -exec rm -rf {} +)"
     ]
   }
 }

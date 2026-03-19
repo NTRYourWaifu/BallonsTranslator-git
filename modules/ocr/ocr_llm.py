@@ -282,6 +282,10 @@ class OCRLlm(OCRBase):
                     wait = 1.5 * (attempt + 1)
                     self.logger.warning(f"限速，暫停 {wait:.1f}s 重試 ({attempt+1}/{max_retries})...")
                     time.sleep(wait)
+                elif 'timeout' in err.lower() or 'timed out' in err.lower():
+                    wait = 2.0 * (attempt + 1)
+                    self.logger.warning(f"請求逾時，暫停 {wait:.1f}s 重試 ({attempt+1}/{max_retries})...")
+                    time.sleep(wait)
                 elif 'Blocked' in err or 'PROHIBITED_CONTENT' in err:
                     return 'BLOCKED_BY_SAFETY'
                 else:
@@ -474,16 +478,19 @@ class OCRLlm(OCRBase):
             return 'SKIP:disabled', 0
         grid_img, visual_order = self._build_grid_img(img, blk_list)
         prompt = self._GRID_PROMPT.replace('{n}', str(len(blk_list)))
-        resp = self._call_ocr(grid_img, custom_prompt=prompt)
-        if resp == 'BLOCKED_BY_SAFETY':
-            return '安全過濾器擋住', 0
-        if resp.startswith('ERR:'):
-            return resp[4:], 0
-        if not resp:
-            return 'API無回應', 0
-        matched = self._parse_fullpage_result(resp, blk_list, visual_order)
-        if matched:
-            return 'ok', matched
+        for attempt in range(2):
+            resp = self._call_ocr(grid_img, custom_prompt=prompt)
+            if resp == 'BLOCKED_BY_SAFETY':
+                return '安全過濾器擋住', 0
+            if resp.startswith('ERR:'):
+                return resp[4:], 0
+            if not resp:
+                return 'API無回應', 0
+            matched = self._parse_fullpage_result(resp, blk_list, visual_order)
+            if matched:
+                return 'ok', matched
+            if attempt == 0:
+                self.logger.warning('Plan A JSON解析失敗，重試一次...')
         return 'JSON解析失敗', 0
 
     # ── 切片模式 ──────────────────────────────────────────────

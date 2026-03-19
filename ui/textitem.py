@@ -37,6 +37,11 @@ def calc_font_size_by_render(blk: TextBlock) -> float:
     # 建立 offscreen document + layout，不加入任何 scene
     doc = QTextDocument()
     doc.setDocumentMargin(0)
+    from utils import shared as _shared
+    _fam = ffmt.font_family or _shared.DEFAULT_FONT_FAMILY
+    _default_font = doc.defaultFont()
+    _default_font.setFamily(_fam)
+    doc.setDefaultFont(_default_font)
     if ffmt.vertical:
         layout = VerticalTextDocumentLayout(doc, ffmt)
     else:
@@ -52,7 +57,11 @@ def calc_font_size_by_render(blk: TextBlock) -> float:
         cursor.select(QTextCursor.SelectionType.Document)
         cfmt = QTextCharFormat()
         cfmt.setFontPointSize(pt_size)
+        if not ffmt.vertical and ffmt.letter_spacing != 1.0:
+            cfmt.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
+            cfmt.setFontLetterSpacing(ffmt.letter_spacing * 100)
         cursor.setCharFormat(cfmt)
+        cursor.setBlockCharFormat(cfmt)
         layout.setMaxSize(blk_w, blk_h, relayout=False)
         layout.reLayout()
         return layout.max_width, layout.max_height
@@ -62,7 +71,10 @@ def calc_font_size_by_render(blk: TextBlock) -> float:
     pt = 8.0
     while pt <= 250.0:
         mw, mh = _render(pt)
-        if mw > blk_w + 0.1 or mh > blk_h + 0.1:
+        sw = layout.shrink_width
+        lc = doc.firstBlock().layout().lineCount()
+        over = mw > blk_w + 0.1 or mh > blk_h + 0.1 or (lc == 1 and sw > blk_w * 0.99)
+        if over:
             break
         best = pt
         pt += step
@@ -872,25 +884,6 @@ class TextBlkItem(QGraphicsTextItem):
         if repaint_background:
             self.update()
 
-        # ── [TRACE-SW] stroke 設完後，layout 的最終狀態 ──
-        if not self.blk.vertical:
-            from utils.logger import logger as _LOGGER
-            doc = self.document()
-            total_lines = 0
-            block = doc.firstBlock()
-            while block.isValid():
-                total_lines += block.layout().lineCount()
-                block = block.next()
-            pad = self.padding()
-            br = self.absBoundingRect()  # [x, y, w, h]
-            _LOGGER.debug(
-                f"[TRACE-SW] idx={self.idx} vert=False xyxy={self.blk.xyxy} "
-                f"fs_px={self.blk.font_size:.1f} sw={stroke_width:.2f} "
-                f"padding={pad:.1f} item_wh={br[2]}x{br[3]} "
-                f"shrink={self.layout.shrink_width:.1f}x{self.layout.shrink_height:.1f} "
-                f"line_count={total_lines} "
-                f"trans={self.blk.translation!r}"
-            )
 
     def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
         '''
