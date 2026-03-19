@@ -1097,8 +1097,7 @@ class MainWindow(mainwindow_cls):
                         blk.font_size = calc_font_size_by_render(blk)
                         _LOGGER.debug(f"[TRACE-2B] blk[{ii}] vert={blk.vertical} xyxy={blk.xyxy} fs {_fs_before:.1f}→{blk.font_size:.1f} sw={blk.stroke_width:.2f}")
 
-            self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
-                (pcfg.module.enable_detect or pcfg.module.enable_translate)
+            self.st_manager.auto_textlayout_flag = False
 
         for _ii, _blk in enumerate(blk_list):
             _LOGGER.debug(f"[TRACE-2C] blk[{_ii}] vert={_blk.vertical} xyxy={_blk.xyxy} fs={_blk.font_size:.1f} sw={_blk.stroke_width:.2f}")

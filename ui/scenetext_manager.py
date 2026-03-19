@@ -881,6 +881,26 @@ class SceneTextManager(QObject):
         maxw = max([ffmt.horizontalAdvance(t) for t in new_text.split('\n')])
         blkitem.set_size(maxw * 1.5, xywh[3], set_layout_maxsize=True)
         blkitem.setPlainText(new_text)
+        # ── [TRACE-LT] layout_textblk 設文字後的實際狀態 ──
+        if not blkitem.blk.vertical:
+            from utils.logger import logger as _LOGGER
+            _doc = blkitem.document()
+            _total_lines = 0
+            _block = _doc.firstBlock()
+            while _block.isValid():
+                _total_lines += _block.layout().lineCount()
+                _block = _block.next()
+            _br = blkitem.absBoundingRect()
+            _LOGGER.debug(
+                f"[TRACE-LT] idx={blkitem.idx} vert=False xyxy={blkitem.blk.xyxy} "
+                f"fs_px={blkitem.blk.font_size:.1f} "
+                f"old_br={int(old_br[2])}x{int(old_br[3])} "
+                f"xywh={xywh} maxw={int(maxw)} set_size={int(maxw*1.5)}x{xywh[3]} "
+                f"item_wh={_br[2]}x{_br[3]} "
+                f"shrink={blkitem.layout.shrink_width:.1f}x{blkitem.layout.shrink_height:.1f} "
+                f"line_count={_total_lines} "
+                f"new_text={new_text!r}"
+            )
         if len(self.pairwidget_list) > blkitem.idx:
             self.pairwidget_list[blkitem.idx].e_trans.setPlainText(new_text)
         if restore_charfmts:
