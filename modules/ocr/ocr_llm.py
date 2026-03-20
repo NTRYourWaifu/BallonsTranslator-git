@@ -117,6 +117,7 @@ class OCRLlm(OCRBase):
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_ratio': {'value': '0.8', 'description': '字體大小係數（0.5~1.2）'},
+        'handwritten_warn_threshold': {'value': '60', 'description': '手寫藝術字字體大於此值（px）才顯示警告圖標'},
         'save_grid_debug': {'type': 'checkbox', 'value': False,
                             'description': '將每頁送給 LLM 的 grid 拼圖存到專案目錄下的 ocr_debug/ 資料夾'},
         'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
@@ -173,6 +174,10 @@ class OCRLlm(OCRBase):
     def font_size_ratio(self) -> float:
         try: return float(self.params['font_size_ratio']['value'])
         except: return 0.8
+    @property
+    def handwritten_warn_threshold(self) -> float:
+        try: return float(self.params['handwritten_warn_threshold']['value'])
+        except: return 60.0
     @property
     def save_grid_debug(self) -> bool:
         return bool(self.params.get('save_grid_debug', {}).get('value', False))
@@ -355,6 +360,7 @@ class OCRLlm(OCRBase):
                 elif llm_dir == 'h':
                     blk.obs.ocr_says_vertical = False
                 blk.obs.ocr_src_text = item['original']
+                blk.obs.ocr_is_handwritten = bool(item.get('is_handwritten', False))
                 matched += 1
 
             return matched > 0
@@ -375,9 +381,10 @@ class OCRLlm(OCRBase):
         "Translation rules:\n"
         "- Translate the original text directly. Do NOT add any parenthetical notes, explanations, or romanizations.\n"
         "- Output ONLY a valid JSON array, one entry per cell:\n"
-        '[{"index": 0, "direction": "v or h", "original": "...", "translation": "..."}, ...]\n'
+        '[{"index": 0, "direction": "v or h", "is_handwritten": false, "original": "...", "translation": "..."}, ...]\n'
         'direction: "v"=vertical/tategumi, "h"=horizontal/yokogumi.\n'
-        'If a cell has no readable text: {"index": N, "direction": "v", "original": "", "translation": ""}\n'
+        'is_handwritten: true if the text appears to be hand-drawn or artistic lettering (not a standard printed font).\n'
+        'If a cell has no readable text: {"index": N, "direction": "v", "is_handwritten": false, "original": "", "translation": ""}\n'
         "Total cells: {n}"
     )
 
@@ -497,7 +504,8 @@ class OCRLlm(OCRBase):
     _SLICE_PROMPT = (
         "Extract the Japanese text from this image and translate to Traditional Chinese. "
         "Line breaks: use the original text's line breaks as a loose reference — keep a line break in the translation only if it fits the natural meaning or rhythm. Do NOT add extra line breaks. "
-        "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\"}. "
+        "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\", \"is_handwritten\": false}. "
+        "is_handwritten: true if the text appears to be hand-drawn or artistic lettering (not a standard printed font). "
         "If the image contains NO TEXT, output an empty JSON {}."
     )
 
@@ -531,6 +539,7 @@ class OCRLlm(OCRBase):
                 blk.text = [data['original']]
                 blk.translation = data.get('translation', '')
                 blk.obs.ocr_src_text = data['original']
+                blk.obs.ocr_is_handwritten = bool(data.get('is_handwritten', False))
                 self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK)
                 return idx, blk
         except Exception as e:
@@ -663,6 +672,8 @@ class OCRLlm(OCRBase):
             self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
             for blk in blk_list:
                 resolve_blk_style(blk, self.font_size_ratio)
+                if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
+                    self._emit(OcrEventType.FONT_WARN)
             return
         self.logger.warning(f"{lp} Plan A：{result}")
 
@@ -674,6 +685,8 @@ class OCRLlm(OCRBase):
                 self.logger.success(f"{lp} Plan B 成功（{ok}/{total} 框）")
                 for blk in blk_list:
                     resolve_blk_style(blk, self.font_size_ratio)
+                    if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
+                        self._emit(OcrEventType.FONT_WARN)
                 return
             else:
                 self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")
@@ -711,6 +724,8 @@ class OCRLlm(OCRBase):
                 self._emit(OcrEventType.ERROR)
             for blk in blk_list:
                 resolve_blk_style(blk, self.font_size_ratio)
+                if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
+                    self._emit(OcrEventType.FONT_WARN)
             if fail == 0:
                 self.logger.success(f"{lp} Plan C 成功（{ok}/{len(failed_indices)} 框）")
             else:
@@ -725,6 +740,8 @@ class OCRLlm(OCRBase):
             if blk.translation and blk.translation.strip() != '●●●':
                 from ui.textitem import calc_font_size_by_render
                 blk.font_size = calc_font_size_by_render(blk)
+            if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
+                self._emit(OcrEventType.FONT_WARN)
         self.logger.error(f"{lp} 所有方案失敗，此頁放棄")
         self._emit(OcrEventType.ERROR)
 

@@ -6,7 +6,10 @@
       "Bash(python3 -c \":*)",
       "Bash(ls -la \"f:/BallonsTranslator-git/modules/textdetector/__pycache__/detector_yolov8\"*.pyc)",
       "Bash(find f:/BallonsTranslator-git/ui -name \"*.pyc\" -delete)",
-      "Bash(find f:/BallonsTranslator-git/ui -name \"__pycache__\" -type d -exec rm -rf {} +)"
+      "Bash(find f:/BallonsTranslator-git/ui -name \"__pycache__\" -type d -exec rm -rf {} +)",
+      "Bash(xargs grep:*)",
+      "Bash(powershell -NoProfile -File \"C:\\\\Users\\\\yee\\\\.claude\\\\notify_sound.ps1\")",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\yee\\\\.claude\\\\notify_sound.ps1\")"
     ]
   }
 }

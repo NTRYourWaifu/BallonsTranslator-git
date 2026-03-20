@@ -78,6 +78,7 @@ class RawObservations:
     # ── OCR 階段填入 ───────────────────────────────
     ocr_src_text: str = ''            # OCR 識別出的原文完整字串
     ocr_says_vertical: bool = None    # LLM 回傳的 direction 欄位判斷
+    ocr_is_handwritten: bool = False  # LLM 回傳的 is_handwritten 欄位
 
 @nested_dataclass
 class TextBlock:
