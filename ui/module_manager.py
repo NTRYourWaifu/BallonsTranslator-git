@@ -927,6 +927,43 @@ class ModuleManager(QObject):
         except Exception:
             pass
 
+        # 閃爍工作列（僅在視窗不在前景時）
+        try:
+            import ctypes
+            import ctypes.wintypes as wintypes
+            from PyQt5.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is None:
+                return
+            main_win = None
+            for widget in app.topLevelWidgets():
+                if widget.isVisible():
+                    main_win = widget
+                    break
+            if main_win is None:
+                return
+            hwnd = int(main_win.winId())
+            user32 = ctypes.windll.user32
+            fg_hwnd = user32.GetForegroundWindow()
+            if fg_hwnd != hwnd:
+                class FLASHWINFO(ctypes.Structure):
+                    _fields_ = [
+                        ('cbSize', wintypes.UINT),
+                        ('hwnd', wintypes.HWND),
+                        ('dwFlags', wintypes.DWORD),
+                        ('uCount', wintypes.UINT),
+                        ('dwTimeout', wintypes.DWORD),
+                    ]
+                fi = FLASHWINFO()
+                fi.cbSize = ctypes.sizeof(fi)
+                fi.hwnd = hwnd
+                fi.dwFlags = 2 | 4  # FLASHW_TRAY | FLASHW_TIMER
+                fi.uCount = 1
+                fi.dwTimeout = 0
+                user32.FlashWindowEx(ctypes.byref(fi))
+        except Exception:
+            pass
+
     def setTranslator(self, translator: str = None):
         if translator is None:
             translator = cfg_module.translator

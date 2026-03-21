@@ -116,8 +116,8 @@ class OCRLlm(OCRBase):
         'base_url':      {'value': '', 'description': '僅 OpenAI 相容 API 使用'},
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
-        'font_size_ratio': {'value': '0.8', 'description': '字體大小係數（0.5~1.2）'},
-        'handwritten_warn_threshold': {'value': '60', 'description': '手寫藝術字字體大於此值（px）才顯示警告圖標'},
+        'font_size_scale': {'value': '1.0', 'description': '字體大小縮放（0.5 縮小一半；1.0 不縮放；1.2 放大 20%）'},
+        'handwritten_warn_ratio': {'value': '0.05', 'description': '手寫藝術字字體超過圖片短邊此比例才顯示警告（預設 0.05 即 5%）'},
         'save_grid_debug': {'type': 'checkbox', 'value': False,
                             'description': '將每頁送給 LLM 的 grid 拼圖存到專案目錄下的 ocr_debug/ 資料夾'},
         'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
@@ -171,13 +171,13 @@ class OCRLlm(OCRBase):
         try: return int(self.params['max_workers']['value'])
         except: return 5
     @property
-    def font_size_ratio(self) -> float:
-        try: return float(self.params['font_size_ratio']['value'])
-        except: return 0.8
+    def font_size_scale(self) -> float:
+        try: return float(self.params['font_size_scale']['value'])
+        except: return 1.0
     @property
-    def handwritten_warn_threshold(self) -> float:
-        try: return float(self.params['handwritten_warn_threshold']['value'])
-        except: return 60.0
+    def handwritten_warn_ratio(self) -> float:
+        try: return float(self.params['handwritten_warn_ratio']['value'])
+        except: return 0.05
     @property
     def save_grid_debug(self) -> bool:
         return bool(self.params.get('save_grid_debug', {}).get('value', False))
@@ -671,9 +671,7 @@ class OCRLlm(OCRBase):
             self._emit(OcrEventType.PLAN_A_OK)
             self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
             for blk in blk_list:
-                resolve_blk_style(blk, self.font_size_ratio)
-                if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
-                    self._emit(OcrEventType.FONT_WARN)
+                resolve_blk_style(blk)
             return
         self.logger.warning(f"{lp} Plan A：{result}")
 
@@ -684,9 +682,7 @@ class OCRLlm(OCRBase):
             if fail == 0:
                 self.logger.success(f"{lp} Plan B 成功（{ok}/{total} 框）")
                 for blk in blk_list:
-                    resolve_blk_style(blk, self.font_size_ratio)
-                    if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
-                        self._emit(OcrEventType.FONT_WARN)
+                    resolve_blk_style(blk)
                 return
             else:
                 self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")
@@ -723,9 +719,7 @@ class OCRLlm(OCRBase):
                 fail += 1
                 self._emit(OcrEventType.ERROR)
             for blk in blk_list:
-                resolve_blk_style(blk, self.font_size_ratio)
-                if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
-                    self._emit(OcrEventType.FONT_WARN)
+                resolve_blk_style(blk)
             if fail == 0:
                 self.logger.success(f"{lp} Plan C 成功（{ok}/{len(failed_indices)} 框）")
             else:
@@ -736,12 +730,7 @@ class OCRLlm(OCRBase):
             blk_list[i].text = ['●●●']
             blk_list[i].translation = '●●●'
         for blk in blk_list:
-            resolve_blk_style(blk, self.font_size_ratio)
-            if blk.translation and blk.translation.strip() != '●●●':
-                from ui.textitem import calc_font_size_by_render
-                blk.font_size = calc_font_size_by_render(blk)
-            if blk.obs.ocr_is_handwritten and blk.font_size > self.handwritten_warn_threshold:
-                self._emit(OcrEventType.FONT_WARN)
+            resolve_blk_style(blk)
         self.logger.error(f"{lp} 所有方案失敗，此頁放棄")
         self._emit(OcrEventType.ERROR)
 

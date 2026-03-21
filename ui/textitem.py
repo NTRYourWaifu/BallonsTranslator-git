@@ -17,10 +17,11 @@ TEXTRECT_SHOW_COLOR = QColor(30, 147, 229, 170)
 TEXTRECT_SELECTED_COLOR = QColor(248, 64, 147, 170)
 
 
-def calc_font_size_by_render(blk: TextBlock) -> float:
+def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0) -> float:
     """
     用 offscreen 渲染二分搜尋，找出讓譯文剛好填入 YOLO 框的最大字體大小（pt）。
     若框面積為 0 或譯文為空，回傳 blk.fontformat.font_size（維持原值）。
+    scale: 最終字體大小縮放係數，1.0 = 不縮放
     """
     translation = blk.translation
     if not translation or not translation.strip():
@@ -79,7 +80,7 @@ def calc_font_size_by_render(blk: TextBlock) -> float:
         best = pt
         pt += step
 
-    return pt2px(best)
+    return pt2px(best * scale)
 
 
 class TextBlkItem(QGraphicsTextItem):

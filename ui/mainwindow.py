@@ -6,9 +6,9 @@ import subprocess
 from functools import partial
 import time
 
-from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit
-from qtpy.QtCore import Qt, QPoint, QSize, QEvent, Signal
-from qtpy.QtGui import QContextMenuEvent, QTextCursor, QGuiApplication, QIcon, QCloseEvent, QKeySequence, QKeyEvent, QPainter, QClipboard
+from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit, QStyledItemDelegate
+from qtpy.QtCore import Qt, QPoint, QPointF, QSize, QEvent, Signal
+from qtpy.QtGui import QContextMenuEvent, QTextCursor, QGuiApplication, QIcon, QCloseEvent, QKeySequence, QKeyEvent, QPainter, QClipboard, QBrush, QColor
 
 from utils.logger import logger as LOGGER
 from utils.text_processing import is_cjk, full_len, half_len
@@ -29,13 +29,68 @@ from .mainwindowbars import TitleBar, LeftBar, BottomBar
 from .io_thread import ImgSaveThread, ImportDocThread, ExportDocThread
 from .custom_widget import Widget, ViewWidget
 from .global_search_widget import GlobalSearchWidget
-from .batch_queue_panel import BatchQueuePanel
+from .batch_queue_panel import BatchQueuePanel, _OCR_PLANS, _OCR_DRAW
 from .textedit_commands import GlobalRepalceAllCommand
 from .framelesswindow import FramelessWindow
 from .drawing_commands import RunBlkTransCommand
 from .keywordsubwidget import KeywordSubWidget
 from . import shared_widget as SW
 from .custom_widget import MessageBox, FrameLessMessageBox, ImgtransProgressMessageBox
+
+# ── 頁面列表 OCR 圖標 ───────────────────────────────────────────
+ROLE_PAGE_OCR = Qt.ItemDataRole.UserRole + 10   # 儲存 {event_type: count} dict
+
+# plan_a_ok（綠勾勾）正常完成不顯示，其餘非零才顯示
+_PAGE_SHOW_EVENTS = {'plan_a2_ok', 'slice_ok', 'grok_ok', 'error'}
+
+_OCR_PLAN_KEYS = [k for k, _ in _OCR_PLANS]
+
+class _PageOcrIconDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)   # 先畫預設（縮圖+文字）
+        stats = index.data(ROLE_PAGE_OCR) or {}
+        # 只取需要顯示的事件，且計數 > 0
+        events_to_show = [
+            (key, color_hex)
+            for key, color_hex in _OCR_PLANS
+            if key in _PAGE_SHOW_EVENTS and stats.get(key, 0) > 0
+        ]
+        if not events_to_show:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        r = option.rect
+        icon_r = 6.0
+        gap = 30   # 圖標 + 右側計數的總寬度
+        # 圖標從右側往左排列
+        cx = float(r.right() - 18)
+        cy = float(r.top() + r.height() // 2)
+
+        num_font = painter.font()
+
+        for key, color_hex in reversed(events_to_show):
+            idx = _OCR_PLAN_KEYS.index(key)
+            color = QColor(color_hex)
+            count = stats.get(key, 0)
+            # 深色背景圓增加對比度
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(20, 20, 20, 180)))
+            painter.drawEllipse(QPointF(cx, cy), icon_r + 2, icon_r + 2)
+            _OCR_DRAW[idx](painter, cx, cy, icon_r, color)
+            # 計數顯示在圖標右側，垂直置中
+            painter.setFont(num_font)
+            painter.setPen(color)
+            painter.drawText(
+                int(cx + icon_r + 3), int(cy - 6), 14, 12,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                str(count)
+            )
+            cx -= gap
+
+        painter.restore()
+
 
 class PageListView(QListWidget):
 
@@ -44,6 +99,7 @@ class PageListView(QListWidget):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.setIconSize(QSize(shared.PAGELIST_THUMBNAIL_SIZE, shared.PAGELIST_THUMBNAIL_SIZE))
+        self.setItemDelegate(_PageOcrIconDelegate(self))
 
     def contextMenuEvent(self, e: QContextMenuEvent):
         menu = QMenu()
@@ -54,6 +110,18 @@ class PageListView(QListWidget):
             self.reveal_file.emit()
 
         return super().contextMenuEvent(e)
+
+    def updatePageOcrStatus(self, imgname: str, event_type: str):
+        """累計某頁的 OCR 事件計數（只加不清）"""
+        for i in range(self.count()):
+            item = self.item(i)
+            if item.text() == imgname:
+                stats = dict(item.data(ROLE_PAGE_OCR) or {})
+                stats[event_type] = stats.get(event_type, 0) + 1
+                item.setData(ROLE_PAGE_OCR, stats)
+                self.viewport().update()
+                return
+
 
 mainwindow_cls = Widget if shared.HEADLESS else FramelessWindow
 class MainWindow(mainwindow_cls):
@@ -85,6 +153,7 @@ class MainWindow(mainwindow_cls):
         self._gui_batch_dirs = []
         self._gui_batch_current = None
         self._gui_batch_running = False
+        self._page_ocr_cache: dict = {}   # {folder_path: {imgname: {event_type: count}}}
 
         self.setupThread()
         self.setupUi()
@@ -433,9 +502,12 @@ class MainWindow(mainwindow_cls):
         else:
             item_func = lambda imgname:\
                 QListWidgetItem(QIcon(osp.join(self.imgtrans_proj.directory, imgname)), imgname)
+        folder_cache = self._page_ocr_cache.get(str(self.imgtrans_proj.directory), {})
         for imgname in self.imgtrans_proj.pages:
             lstitem =  item_func(imgname)
             self.pageList.addItem(lstitem)
+            if imgname in folder_cache:
+                lstitem.setData(ROLE_PAGE_OCR, folder_cache[imgname])
             if imgname == self.imgtrans_proj.current_img:
                 self.pageList.setCurrentItem(lstitem)
 
@@ -1089,7 +1161,30 @@ class MainWindow(mainwindow_cls):
                     # stroke_width 縮減後，用 render 算最終字體大小
                     if not override_fnt_size and blk.translation and blk.translation.strip() not in ('', '●●●'):
                         from ui.textitem import calc_font_size_by_render
-                        blk.font_size = calc_font_size_by_render(blk)
+                        _ocr = self.module_manager.ocr_thread.ocr
+                        _scale = _ocr.font_size_scale if _ocr is not None and hasattr(_ocr, 'font_size_scale') else 1.0
+                        blk.font_size = calc_font_size_by_render(blk, scale=_scale)
+
+            # 手寫字型過大警告（用最終 pt 值比較，避免像素值誤判）
+            ocr = self.module_manager.ocr_thread.ocr
+            if ocr is not None and hasattr(ocr, 'handwritten_warn_ratio') and hasattr(ocr, '_emit'):
+                from modules.ocr.ocr_llm import OcrEventType
+                imgname = self.imgtrans_proj.idx2pagename(page_index)
+                img = self.imgtrans_proj.read_img(imgname)
+                img_h, img_w = img.shape[:2]
+                warn_threshold_pt = ocr.handwritten_warn_ratio * min(img_h, img_w)
+                warn_count = 0
+                for blk in blk_list:
+                    if blk.obs.ocr_is_handwritten and blk.font_size > warn_threshold_pt:
+                        ocr.logger.warning(f"[{imgname}] 字型過大 font_size={blk.font_size:.1f}pt > threshold={warn_threshold_pt:.1f} 譯文：{blk.translation!r}")
+                        warn_count += 1
+                for _ in range(warn_count):
+                    # 直接更新頁面圖標（不透過 stats_signals，避免 _on_batch_ocr_event
+                    # 讀到已跳下一頁的 ocr.current_imgname 而貼錯頁面）
+                    self.pageList.updatePageOcrStatus(osp.basename(imgname), OcrEventType.FONT_WARN)
+                    # 只更新 stats bar，跳過 ocr_event_callback
+                    if self.bottomBar.ocr_stats_bar is not None:
+                        self.bottomBar.ocr_stats_bar._on_event(OcrEventType.FONT_WARN)
 
             self.st_manager.auto_textlayout_flag = False
 
@@ -1327,9 +1422,20 @@ class MainWindow(mainwindow_cls):
         self._prepare_imgtrans_run(reset_stats=False)
 
     def _on_batch_ocr_event(self, event_type: str):
-        """轉發 OCR 事件到佇列面板的當前資料夾"""
+        """轉發 OCR 事件到佇列面板的當前資料夾，並更新頁面列表圖標"""
         if self._gui_batch_running and self._gui_batch_current:
             self.batchQueuePanel.updateOcrStats(self._gui_batch_current, event_type)
+        # 更新頁面列表圖標（讀 ocr.current_imgname 比 imgtrans_proj.current_img 更準確）
+        ocr = getattr(self.module_manager, 'ocr', None)
+        raw_imgname = getattr(ocr, 'current_imgname', None)
+        if raw_imgname:
+            imgname = osp.basename(raw_imgname)
+            self.pageList.updatePageOcrStatus(imgname, event_type)
+            folder = self.imgtrans_proj.directory
+            if folder:
+                folder_cache = self._page_ocr_cache.setdefault(str(folder), {})
+                img_cache = folder_cache.setdefault(imgname, {})
+                img_cache[event_type] = img_cache.get(event_type, 0) + 1
 
     def on_fin_export_doc(self):
         msg = QMessageBox()
