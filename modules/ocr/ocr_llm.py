@@ -24,6 +24,7 @@ class OcrEventType:
     SLICE_OK   = 'slice_ok'    # 橘  Plan B 切片（主API）成功
     GROK_OK    = 'grok_ok'     # 粉  Grok 成功（切片或全頁）
     ERROR      = 'error'       # 紅  最終放棄此頁
+    DET_WARN   = 'det_warn'    # 黃方 偵測方向異常（CTD/YOLO 方向矛盾）
 
 
 class OcrStatsSignals(QObject):
@@ -117,7 +118,7 @@ class OCRLlm(OCRBase):
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_scale': {'value': '1.0', 'description': '字體大小縮放（0.5 縮小一半；1.0 不縮放；1.2 放大 20%）'},
-        'handwritten_warn_ratio': {'value': '0.05', 'description': '手寫藝術字字體超過圖片短邊此比例才顯示警告（預設 0.05 即 5%）'},
+        'handwritten_size_ratio': {'value': '1.5', 'description': '手寫字：實際渲染大小與 LLM 估算大小的比值超過此倍數（過大）或低於此倍數的倒數（過小）才警告（預設 1.5）'},
         'save_grid_debug': {'type': 'checkbox', 'value': False,
                             'description': '將每頁送給 LLM 的 grid 拼圖存到專案目錄下的 ocr_debug/ 資料夾'},
         'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
@@ -175,9 +176,9 @@ class OCRLlm(OCRBase):
         try: return float(self.params['font_size_scale']['value'])
         except: return 1.0
     @property
-    def handwritten_warn_ratio(self) -> float:
-        try: return float(self.params['handwritten_warn_ratio']['value'])
-        except: return 0.05
+    def handwritten_size_ratio(self) -> float:
+        try: return float(self.params['handwritten_size_ratio']['value'])
+        except: return 1.5
     @property
     def save_grid_debug(self) -> bool:
         return bool(self.params.get('save_grid_debug', {}).get('value', False))
@@ -361,6 +362,7 @@ class OCRLlm(OCRBase):
                     blk.obs.ocr_says_vertical = False
                 blk.obs.ocr_src_text = item['original']
                 blk.obs.ocr_is_handwritten = bool(item.get('is_handwritten', False))
+                blk.obs.ocr_font_size_px = float(item.get('font_size_px', -1))
                 matched += 1
 
             return matched > 0
@@ -381,10 +383,11 @@ class OCRLlm(OCRBase):
         "Translation rules:\n"
         "- Translate the original text directly. Do NOT add any parenthetical notes, explanations, or romanizations.\n"
         "- Output ONLY a valid JSON array, one entry per cell:\n"
-        '[{"index": 0, "direction": "v or h", "is_handwritten": false, "original": "...", "translation": "..."}, ...]\n'
+        '[{"index": 0, "direction": "v or h", "is_handwritten": false, "font_size_px": 24, "original": "...", "translation": "..."}, ...]\n'
         'direction: "v"=vertical/tategumi, "h"=horizontal/yokogumi.\n'
         'is_handwritten: true if the text appears to be hand-drawn or artistic lettering (not a standard printed font).\n'
-        'If a cell has no readable text: {"index": N, "direction": "v", "is_handwritten": false, "original": "", "translation": ""}\n'
+        'font_size_px: estimate the height of a single character in pixels.\n'
+        'If a cell has no readable text: {"index": N, "direction": "v", "is_handwritten": false, "font_size_px": 0, "original": "", "translation": ""}\n'
         "Total cells: {n}"
     )
 
@@ -504,8 +507,9 @@ class OCRLlm(OCRBase):
     _SLICE_PROMPT = (
         "Extract the Japanese text from this image and translate to Traditional Chinese. "
         "Line breaks: use the original text's line breaks as a loose reference — keep a line break in the translation only if it fits the natural meaning or rhythm. Do NOT add extra line breaks. "
-        "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\", \"is_handwritten\": false}. "
+        "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\", \"is_handwritten\": false, \"font_size_px\": 24}. "
         "is_handwritten: true if the text appears to be hand-drawn or artistic lettering (not a standard printed font). "
+        "font_size_px: estimate the height of a single character in pixels. "
         "If the image contains NO TEXT, output an empty JSON {}."
     )
 
@@ -540,6 +544,7 @@ class OCRLlm(OCRBase):
                 blk.translation = data.get('translation', '')
                 blk.obs.ocr_src_text = data['original']
                 blk.obs.ocr_is_handwritten = bool(data.get('is_handwritten', False))
+                blk.obs.ocr_font_size_px = float(data.get('font_size_px', -1))
                 self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK)
                 return idx, blk
         except Exception as e:

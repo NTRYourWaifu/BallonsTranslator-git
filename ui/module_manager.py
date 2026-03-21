@@ -391,6 +391,8 @@ class ImgtransThread(QThread):
             blk_removed: List[TextBlock] = []
             if cfg_module.enable_detect:
                 try:
+                    if hasattr(self.textdetector, 'current_imgname'):
+                        self.textdetector.current_imgname = imgname
                     mask, blk_list = self.textdetector.detect(img)
                     if self.mask_postprocess is not None:
                         mask = self.mask_postprocess(mask)
@@ -639,7 +641,7 @@ class ModuleManager(QObject):
         self.check_inpaint_fin_timer = QTimer(self)
         self.check_inpaint_fin_timer.timeout.connect(self.check_inpaint_th_finished)
 
-    def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_postprocess: Callable = None, ocr_stats_bar=None, ocr_event_callback=None):
+    def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_postprocess: Callable = None, ocr_stats_bar=None, ocr_event_callback=None, det_event_callback=None):
         self.textdetect_thread = TextDetectThread()
         self.textdetect_thread.finish_set_module.connect(self.on_finish_setdetector)
 
@@ -647,6 +649,7 @@ class ModuleManager(QObject):
         self.ocr_thread.finish_set_module.connect(self.on_finish_setocr)
         self.ocr_stats_bar = ocr_stats_bar
         self.ocr_event_callback = ocr_event_callback
+        self.det_event_callback = det_event_callback
 
         self.translate_thread = TranslateThread()
         self.translate_thread.progress_changed.connect(self.on_update_translate_progress)
@@ -1010,6 +1013,11 @@ class ModuleManager(QObject):
             cfg_module.textdetector = self.textdetector.name
             self.textdetect_panel.setDetector(self.textdetector.name)
             LOGGER.info('Text detector set to {}'.format(self.textdetector.name))
+            if hasattr(self.textdetector, 'det_signals'):
+                if self.ocr_stats_bar is not None:
+                    self.textdetector.det_signals.event.connect(self.ocr_stats_bar._on_event)
+                if self.det_event_callback is not None:
+                    self.textdetector.det_signals.event.connect(self.det_event_callback)
 
     def on_finish_setocr(self):
         if self.ocr is not None:

@@ -4,10 +4,15 @@ import numpy as np
 from typing import List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ultralytics import YOLO
+from qtpy.QtCore import QObject, Signal
 
 from .base import register_textdetectors, TextDetectorBase, TextBlock
 from utils.imgproc_utils import xywh2xyxypoly
 from utils.textblock import examine_textblk
+
+
+class DetectorSignals(QObject):
+    event = Signal(str)
 
 
 @register_textdetectors('yolov8')
@@ -74,6 +79,8 @@ class DetectorYOLOv8(TextDetectorBase):
         self.model = None
         self._ctd: Optional['ComicTextDetector'] = None   # 懶載入
         self._last_raw_boxes: List[List[int]] = []
+        self.det_signals = DetectorSignals()
+        self.current_imgname: str = ''
         self._load_model()
 
     # ── properties ───────────────────────────────────────────
@@ -392,11 +399,13 @@ class DetectorYOLOv8(TextDetectorBase):
             # ── A-2 異常警告：vertical 與面積比推斷不一致 ────
             # 永遠 log（不限 det_debug_log），方便排查偵測品質問題
             if ctd_is_hori != area_says_hori:
+                img_tag = f"[{self.current_imgname}] " if self.current_imgname else ""
                 self.logger.warning(
-                    f"[det 方向異常] CTD.vertical={ctd_blk.vertical} "
+                    f"{img_tag}[det 方向異常] CTD.vertical={ctd_blk.vertical} "
                     f"但面積比={area_ratio:.2f}（門檻={area_ratio_thresh}）推斷相反方向 "
                     f"| CTD{ctd_blk.xyxy} YOLO{best_yolo_blk.xyxy}"
                 )
+                self.det_signals.event.emit('det_warn')
 
             # ── 主判斷 ───────────────────────────────────────
             if ctd_is_hori:

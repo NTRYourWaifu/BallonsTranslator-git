@@ -10,10 +10,11 @@ ui/custom_widget/ocr_stats_bar.py
   ✂  Plan C 成功（切片）    橘
   ◆  Plan D 成功（Grok）    粉
   ✕  Error 異常             紅
+  ■  偵測方向異常           黃
 """
 
 from qtpy.QtWidgets import QHBoxLayout, QWidget
-from qtpy.QtCore import Qt, Slot, QPoint, QPointF
+from qtpy.QtCore import Qt, Slot, QPoint, QPointF, QRectF
 from qtpy.QtGui import (
     QFont, QPainter, QColor, QBrush, QPen,
     QPainterPath, QPolygonF,
@@ -87,6 +88,14 @@ def _draw_cross(p: QPainter, cx: float, cy: float, r: float, color: QColor):
     p.drawLine(QPointF(cx - d, cy + d), QPointF(cx + d, cy - d))
 
 
+def _draw_square(p: QPainter, cx: float, cy: float, r: float, color: QColor):
+    """■ 實心正方形（偵測方向異常）"""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(color))
+    half = r * 0.65
+    p.drawRect(QRectF(cx - half, cy - half, half * 2, half * 2))
+
+
 # ── Plan 設定 ────────────────────────────────────────────────
 # (event_key, draw_func, 顏色, tooltip)
 _PLAN_CONFIG = [
@@ -95,6 +104,7 @@ _PLAN_CONFIG = [
     ('slice_ok',   _draw_scissors, '#ff9800', 'Plan C（切片）成功'),
     ('grok_ok',    _draw_diamond,  '#e91e96', 'Plan D（Grok）成功'),
     ('error',      _draw_cross,    '#f44336', '異常 / 放棄'),
+    ('det_warn',   _draw_square,   '#ffc107', '偵測方向異常'),
 ]
 
 

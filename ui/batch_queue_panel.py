@@ -4,7 +4,7 @@ ui/batch_queue_panel.py
 批量翻譯佇列面板
 - 外部拖入資料夾加入佇列
 - 列表內拖動排序
-- 點擊圓點展開/收合 5 色 OCR 統計（完整 press+release 才觸發，不與拖曳衝突）
+- 點擊圓點展開/收合 6 色 OCR 統計（完整 press+release 才觸發，不與拖曳衝突）
 """
 
 import os
@@ -15,7 +15,7 @@ from qtpy.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QAbstractItemView, QMenu,
     QWidget, QStyledItemDelegate, QStyleOptionViewItem, QStyle,
 )
-from qtpy.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QModelIndex
+from qtpy.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF, QModelIndex
 from qtpy.QtGui import (
     QDragEnterEvent, QDropEvent, QPainter, QColor, QFont,
     QPen, QBrush, QPainterPath, QPolygonF, QMouseEvent,
@@ -56,11 +56,12 @@ _OCR_PLANS = [
     ('slice_ok',   '#ff9800'),
     ('grok_ok',    '#e91e96'),
     ('error',      '#f44336'),
+    ('det_warn',   '#ffc107'),
 ]
 
 _OCR_TOOLTIPS = [
     'Plan A 原圖成功', '⚠️ 字型異常警告', 'Plan B 切片成功',
-    'Plan C Grok 備援', '異常 / 放棄',
+    'Plan C Grok 備援', '異常 / 放棄', '偵測方向異常',
 ]
 
 
@@ -102,7 +103,12 @@ def _draw_cross(p, cx, cy, r, color):
     p.drawLine(QPointF(cx-d, cy-d), QPointF(cx+d, cy+d))
     p.drawLine(QPointF(cx-d, cy+d), QPointF(cx+d, cy-d))
 
-_OCR_DRAW = [_draw_check, _draw_triangle, _draw_scissors, _draw_diamond, _draw_cross]
+def _draw_square(p, cx, cy, r, color):
+    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(color))
+    half = r * 0.65
+    p.drawRect(QRectF(cx - half, cy - half, half * 2, half * 2))
+
+_OCR_DRAW = [_draw_check, _draw_triangle, _draw_scissors, _draw_diamond, _draw_cross, _draw_square]
 
 
 # ── Delegate ──────────────────────────────────────────────────

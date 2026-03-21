@@ -41,7 +41,7 @@ from .custom_widget import MessageBox, FrameLessMessageBox, ImgtransProgressMess
 ROLE_PAGE_OCR = Qt.ItemDataRole.UserRole + 10   # 儲存 {event_type: count} dict
 
 # plan_a_ok（綠勾勾）正常完成不顯示，其餘非零才顯示
-_PAGE_SHOW_EVENTS = {'plan_a2_ok', 'slice_ok', 'grok_ok', 'error'}
+_PAGE_SHOW_EVENTS = {'plan_a2_ok', 'slice_ok', 'grok_ok', 'error', 'det_warn'}
 
 _OCR_PLAN_KEYS = [k for k, _ in _OCR_PLANS]
 
@@ -356,7 +356,7 @@ class MainWindow(mainwindow_cls):
         module_manager.finish_translate_page.connect(self.finishTranslatePage)
         module_manager.imgtrans_pipeline_finished.connect(self.on_imgtrans_pipeline_finished)
         module_manager.page_trans_finished.connect(self.on_pagtrans_finished)
-        module_manager.setupThread(self.configPanel, self.imgtrans_progress_msgbox, self.ocr_postprocess, self.translate_postprocess, ocr_stats_bar=self.bottomBar.ocr_stats_bar, ocr_event_callback=self._on_batch_ocr_event)
+        module_manager.setupThread(self.configPanel, self.imgtrans_progress_msgbox, self.ocr_postprocess, self.translate_postprocess, ocr_stats_bar=self.bottomBar.ocr_stats_bar, ocr_event_callback=self._on_batch_ocr_event, det_event_callback=self._on_batch_ocr_event)
         module_manager.progress_msgbox.showed.connect(self.on_imgtrans_progressbox_showed)
         module_manager.imgtrans_thread.mask_postprocess = self.drawingPanel.rectPanel.post_process_mask
         module_manager.blktrans_pipeline_finished.connect(self.on_blktrans_finished)
@@ -1165,26 +1165,42 @@ class MainWindow(mainwindow_cls):
                         _scale = _ocr.font_size_scale if _ocr is not None and hasattr(_ocr, 'font_size_scale') else 1.0
                         blk.font_size = calc_font_size_by_render(blk, scale=_scale)
 
-            # 手寫字型過大警告（用最終 pt 值比較，避免像素值誤判）
+            # 手寫字型過大警告（實際渲染 pt 超過 LLM 估算 px 換算值的比例才警告）
             ocr = self.module_manager.ocr_thread.ocr
-            if ocr is not None and hasattr(ocr, 'handwritten_warn_ratio') and hasattr(ocr, '_emit'):
+            if ocr is not None and hasattr(ocr, 'handwritten_size_ratio') and hasattr(ocr, '_emit'):
                 from modules.ocr.ocr_llm import OcrEventType
+                from utils.fontformat import px2pt
                 imgname = self.imgtrans_proj.idx2pagename(page_index)
-                img = self.imgtrans_proj.read_img(imgname)
-                img_h, img_w = img.shape[:2]
-                warn_threshold_pt = ocr.handwritten_warn_ratio * min(img_h, img_w)
+                ratio = ocr.handwritten_size_ratio
                 warn_count = 0
                 for blk in blk_list:
-                    if blk.obs.ocr_is_handwritten and blk.font_size > warn_threshold_pt:
-                        ocr.logger.warning(f"[{imgname}] 字型過大 font_size={blk.font_size:.1f}pt > threshold={warn_threshold_pt:.1f} 譯文：{blk.translation!r}")
-                        warn_count += 1
-                for _ in range(warn_count):
-                    # 直接更新頁面圖標（不透過 stats_signals，避免 _on_batch_ocr_event
-                    # 讀到已跳下一頁的 ocr.current_imgname 而貼錯頁面）
-                    self.pageList.updatePageOcrStatus(osp.basename(imgname), OcrEventType.FONT_WARN)
-                    # 只更新 stats bar，跳過 ocr_event_callback
+                    llm_fs_px = blk.obs.ocr_font_size_px
+                    if blk.obs.ocr_is_handwritten and llm_fs_px > 0:
+                        llm_fs_pt = px2pt(llm_fs_px)
+                        if blk.font_size > llm_fs_pt * ratio:
+                            ocr.logger.warning(f"[{imgname}] 手寫字型過大 render={blk.font_size:.1f}pt llm={llm_fs_pt:.1f}pt ratio={blk.font_size/llm_fs_pt:.2f} 譯文：{blk.translation!r}")
+                            warn_count += 1
+                        elif llm_fs_pt > 0 and blk.font_size < llm_fs_pt / ratio:
+                            ocr.logger.warning(f"[{imgname}] 手寫字型過小 render={blk.font_size:.1f}pt llm={llm_fs_pt:.1f}pt ratio={blk.font_size/llm_fs_pt:.2f} 譯文：{blk.translation!r}")
+                            warn_count += 1
+                if warn_count > 0:
+                    bname = osp.basename(imgname)
+                    # 更新圖片列表圖標（用 imgname 而非 ocr.current_imgname，避免批量時頁面已切換）
+                    self.pageList.updatePageOcrStatus(bname, OcrEventType.FONT_WARN)
+                    # 更新佇列資料夾統計（每個觸發警告的對話框各 +1）
+                    if self._gui_batch_running and self._gui_batch_current:
+                        for _ in range(warn_count):
+                            self.batchQueuePanel.updateOcrStats(self._gui_batch_current, OcrEventType.FONT_WARN)
+                    # 更新快取
+                    folder = self.imgtrans_proj.directory
+                    if folder:
+                        folder_cache = self._page_ocr_cache.setdefault(str(folder), {})
+                        img_cache = folder_cache.setdefault(bname, {})
+                        img_cache[OcrEventType.FONT_WARN] = img_cache.get(OcrEventType.FONT_WARN, 0) + warn_count
+                    # 更新底部 stats bar
                     if self.bottomBar.ocr_stats_bar is not None:
-                        self.bottomBar.ocr_stats_bar._on_event(OcrEventType.FONT_WARN)
+                        for _ in range(warn_count):
+                            self.bottomBar.ocr_stats_bar._on_event(OcrEventType.FONT_WARN)
 
             self.st_manager.auto_textlayout_flag = False
 
@@ -1425,9 +1441,13 @@ class MainWindow(mainwindow_cls):
         """轉發 OCR 事件到佇列面板的當前資料夾，並更新頁面列表圖標"""
         if self._gui_batch_running and self._gui_batch_current:
             self.batchQueuePanel.updateOcrStats(self._gui_batch_current, event_type)
-        # 更新頁面列表圖標（讀 ocr.current_imgname 比 imgtrans_proj.current_img 更準確）
+        # det_warn 來自 detector，其餘事件來自 ocr
+        detector = getattr(self.module_manager, 'textdetector', None)
         ocr = getattr(self.module_manager, 'ocr', None)
-        raw_imgname = getattr(ocr, 'current_imgname', None)
+        if event_type == 'det_warn':
+            raw_imgname = getattr(detector, 'current_imgname', None)
+        else:
+            raw_imgname = getattr(ocr, 'current_imgname', None)
         if raw_imgname:
             imgname = osp.basename(raw_imgname)
             self.pageList.updatePageOcrStatus(imgname, event_type)
