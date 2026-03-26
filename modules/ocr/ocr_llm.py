@@ -37,6 +37,24 @@ def _img_to_base64(img: np.ndarray) -> str:
     return base64.b64encode(buffer.tobytes()).decode('utf-8')
 
 
+def _fmt_api_error(data: dict) -> str:
+    """從 API 回應 dict 提取最有用的錯誤摘要，避免印出整個 JSON 噪音"""
+    if not isinstance(data, dict):
+        return str(data)[:120]
+    # Gemini / Google 格式: {"error": {"code": 429, "message": "..."}}
+    err = data.get('error')
+    if isinstance(err, dict):
+        code = err.get('code', '?')
+        msg  = err.get('message', err.get('status', 'unknown'))
+        return f"[{code}] {str(msg)[:120]}"
+    if isinstance(err, str):
+        return f"error={err[:120]}"
+    # OpenAI 格式: {"error": {"message": "...", "type": "...", "code": "..."}}
+    # （同上，已被上面 isinstance(err, dict) 涵蓋）
+    # 未知格式：只印 keys + 前80字
+    return f"keys={list(data.keys())} | {str(data)[:80]}"
+
+
 # ── API 客戶端 ────────────────────────────────────────────────
 class GeminiClient:
     BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
@@ -45,7 +63,7 @@ class GeminiClient:
         self.api_key = api_key
         self.model = model
 
-    def ocr(self, img_b64: str, prompt: str) -> str:
+    def ocr(self, img_b64: str, prompt: str, timeout: int = 120) -> str:
         url = self.BASE_URL.format(model=self.model) + f'?key={self.api_key}'
         payload = {
             'contents': [{'parts': [
@@ -60,16 +78,19 @@ class GeminiClient:
                 {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'}
             ]
         }
-        resp = requests.post(url, json=payload, timeout=45)
+        resp = requests.post(url, json=payload, timeout=timeout)
         if resp.status_code != 200:
-            raise RuntimeError(f"API Error {resp.status_code}: {resp.text}")
+            err_data = resp.json() if resp.content else {}
+            if resp.status_code not in (503, 500):
+                import logging; logging.getLogger(__name__).error(f"[GeminiClient] {resp.status_code} {self.model} => {_fmt_api_error(err_data)}")
+            raise RuntimeError(f"API Error {resp.status_code}: {_fmt_api_error(err_data)}")
         data = resp.json()
         try:
             if 'promptFeedback' in data and 'blockReason' in data['promptFeedback']:
                 raise RuntimeError(f"Blocked: {data['promptFeedback']['blockReason']}")
             return data['candidates'][0]['content']['parts'][0]['text'].strip()
         except (KeyError, IndexError) as e:
-            raise RuntimeError(f"Gemini 回應異常: {data}") from e
+            raise RuntimeError(f"Gemini 回應異常: {_fmt_api_error(data)}") from e
 
 
 class OpenAICompatClient:
@@ -79,7 +100,8 @@ class OpenAICompatClient:
         self.model = model
         self.base_url = base_url.rstrip('/')
 
-    def ocr(self, img_b64: str, prompt: str, timeout: int = 45) -> str:
+    def ocr(self, img_b64: str, prompt: str, timeout: int = 45,
+            allow_array: bool = False) -> str:
         url = f'{self.base_url}/chat/completions'
         headers = {'Authorization': f'Bearer {self.api_key}',
                    'Content-Type': 'application/json'}
@@ -90,40 +112,56 @@ class OpenAICompatClient:
                 {'type': 'image_url',
                  'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}}
             ]}],
-            'response_format': {'type': 'json_object'}
         }
+        if not allow_array:
+            payload['response_format'] = {'type': 'json_object'}
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            import logging; logging.getLogger(__name__).error(f"[OpenAICompatClient] {resp.status_code} {self.model} => {_fmt_api_error(resp.json() if resp.content else {})}")
+            raise RuntimeError(f"API Error {resp.status_code}: {_fmt_api_error(resp.json() if resp.content else {})}")
         data = resp.json()
         try:
             return data['choices'][0]['message']['content'].strip()
         except (KeyError, IndexError) as e:
-            raise RuntimeError(f'OpenAI API 回應異常: {data}') from e
+            raise RuntimeError(f'OpenAI API 回應異常: {_fmt_api_error(data)}') from e
 
 
 # ── 主模組 ────────────────────────────────────────────────────
 @register_OCR('llm_ocr')
 class OCRLlm(OCRBase):
+    _MODEL_OPTIONS = [
+        'gemini-3.1-flash-lite-preview',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+        'grok-4.20-0309-reasoning',
+        'grok-4.20-0309-non-reasoning',
+        'grok-4-1-fast-reasoning',
+        'grok-4-1-fast-non-reasoning',
+        '',  # 空 = 不使用（模型名稱錯誤）
+    ]
+
     params = {
-        'provider': {
+        'gemini_api_key': {'value': '', 'description': 'Gemini API 金鑰（用於 gemini-* 模型）'},
+        'grok_api_key':   {'value': '', 'description': 'xAI API 金鑰（用於 grok-* 模型）'},
+        'model': {
             'type': 'selector',
-            'options': ['Gemini', 'OpenAI / 相容 API'],
-            'value': 'Gemini',
-            'description': '選擇 API 提供商'
+            'options': _MODEL_OPTIONS,
+            'value': 'gemini-3.1-flash-lite-preview',
+            'description': '主模型（空 = 不使用）'
         },
-        'api_key':       {'value': '', 'description': 'API 金鑰'},
-        'model':         {'value': 'gemini-3.1-flash-lite-preview',
-                          'description': '建議：gemini-3.1-flash-lite-preview'},
-        'base_url':      {'value': '', 'description': '僅 OpenAI 相容 API 使用'},
+        'fallback_model': {
+            'type': 'selector',
+            'options': _MODEL_OPTIONS,
+            'value': 'grok-4.20-0309-non-reasoning',
+            'description': '備援模型（空 = 不使用備援）'
+        },
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_scale': {'value': '1.0', 'description': '字體大小縮放（0.5 縮小一半；1.0 不縮放；1.2 放大 20%）'},
+        'char_scale_table': {'value': '3:0.04:0.40, 6:0.06:0.45, 12:0.08:0.50, 22:0.10:0.55', 'description': '字數縮放表：「字數:佔比閾值:縮放係數」用逗號分隔。字數落在對應段時，佔比超過該段閾值才縮，縮放係數直接乘在原字體上'},
         'handwritten_size_ratio': {'value': '1.5', 'description': '手寫字：實際渲染大小與 LLM 估算大小的比值超過此倍數（過大）或低於此倍數的倒數（過小）才警告（預設 1.5）'},
         'save_grid_debug': {'type': 'checkbox', 'value': False,
                             'description': '將每頁送給 LLM 的 grid 拼圖存到專案目錄下的 ocr_debug/ 資料夾'},
-        'fallback_api_key': {'value': '', 'description': '備援 Grok API 金鑰'},
-        'fallback_model':   {'value': 'grok-4.20-beta-0309-non-reasoning',
-                             'description': '備援模型，需支援 vision'},
         'disable_plan_a': {'type': 'checkbox', 'value': False,
                            'description': '測試用：停用 Plan A（強制跳到 Plan B）'},
         'disable_plan_b': {'type': 'checkbox', 'value': False,
@@ -143,6 +181,7 @@ class OCRLlm(OCRBase):
         self.current_imgname = ''
         self.current_img_dir = ''
         self.stats_signals = OcrStatsSignals()
+        self.stop_flag = False
         self._build_client()
 
     def _fmt_imgname(self, name: str) -> str:
@@ -154,15 +193,22 @@ class OCRLlm(OCRBase):
         stem = name[:ext_idx] if ext_idx != -1 else name
         return f'{stem[:3]}...{stem[-3:]}{ext}'
 
+    # ── helpers ───────────────────────────────────────────────
+    @staticmethod
+    def _is_gemini(model: str) -> bool:
+        return model.startswith('gemini')
+
+    @staticmethod
+    def _xai_base_url() -> str:
+        return 'https://api.x.ai/v1'
+
     # ── properties ───────────────────────────────────────────
     @property
-    def provider(self) -> str:   return self.params['provider']['value']
+    def gemini_api_key(self) -> str: return self.params['gemini_api_key']['value']
     @property
-    def api_key(self) -> str:    return self.params['api_key']['value']
+    def grok_api_key(self) -> str:   return self.params['grok_api_key']['value']
     @property
     def model(self) -> str:      return self.params['model']['value']
-    @property
-    def base_url(self) -> str:   return self.params['base_url']['value']
     @property
     def delay(self) -> float:
         try: return float(self.params['delay']['value'])
@@ -176,14 +222,25 @@ class OCRLlm(OCRBase):
         try: return float(self.params['font_size_scale']['value'])
         except: return 1.0
     @property
+    def char_scale_table(self) -> list:
+        """解析 '3:0.04:0.40, 6:0.06:0.45' → [(3,0.04,0.40),(6,0.06,0.45),...]"""
+        try:
+            raw = self.params['char_scale_table']['value']
+            result = []
+            for seg in raw.split(','):
+                parts = [p.strip() for p in seg.strip().split(':')]
+                if len(parts) == 3:
+                    result.append((int(parts[0]), float(parts[1]), float(parts[2])))
+            return sorted(result, key=lambda x: x[0])
+        except:
+            return [(3, 0.04, 0.40), (6, 0.06, 0.45), (12, 0.08, 0.50), (22, 0.10, 0.55)]
+    @property
     def handwritten_size_ratio(self) -> float:
         try: return float(self.params['handwritten_size_ratio']['value'])
         except: return 1.5
     @property
     def save_grid_debug(self) -> bool:
         return bool(self.params.get('save_grid_debug', {}).get('value', False))
-    @property
-    def fallback_api_key(self) -> str:  return self.params['fallback_api_key']['value']
     @property
     def fallback_model(self) -> str:    return self.params['fallback_model']['value']
     @property
@@ -196,20 +253,25 @@ class OCRLlm(OCRBase):
         self.stats_signals.event.emit(event_type)
 
     # ── 客戶端 ────────────────────────────────────────────────
+    def _api_key_for(self, model: str) -> str:
+        return self.gemini_api_key if self._is_gemini(model) else self.grok_api_key
+
     def _build_client(self):
-        if not self.api_key: return
-        if self.provider == 'Gemini':
-            self.client = GeminiClient(api_key=self.api_key, model=self.model)
+        if not self.model: return
+        key = self._api_key_for(self.model)
+        if not key: return
+        if self._is_gemini(self.model):
+            self.client = GeminiClient(api_key=key, model=self.model)
         else:
-            self.client = OpenAICompatClient(
-                api_key=self.api_key, model=self.model, base_url=self.base_url)
+            self.client = OpenAICompatClient(api_key=key, model=self.model, base_url=self._xai_base_url())
 
     def _build_fallback_client(self):
-        if not self.fallback_api_key: return None
-        return OpenAICompatClient(
-            api_key=self.fallback_api_key,
-            model=self.fallback_model,
-            base_url='https://api.x.ai/v1')
+        if not self.fallback_model: return None
+        key = self._api_key_for(self.fallback_model)
+        if not key: return None
+        if self._is_gemini(self.fallback_model):
+            return GeminiClient(api_key=key, model=self.fallback_model)
+        return OpenAICompatClient(api_key=key, model=self.fallback_model, base_url=self._xai_base_url())
 
     # ── 速率控制 ──────────────────────────────────────────────
     def _respect_delay(self):
@@ -269,28 +331,68 @@ class OCRLlm(OCRBase):
             return '安全過濾器擋住'
         return f'未知錯誤({err[:30]})'
 
-    def _call_ocr(self, img: np.ndarray, custom_prompt: str = None) -> str:
+    def _call_ocr(self, img: np.ndarray, custom_prompt: str = None,
+                  allow_array: bool = False) -> str:
         """回傳: 原始字串 | 'BLOCKED_BY_SAFETY' | 'ERR:原因'"""
         if self.client is None:
             return 'ERR:未設定API金鑰'
         img_b64 = _img_to_base64(img)
         target_prompt = custom_prompt
-        
-        # 固定遞增重試等待
-        max_retries = 3
-        for attempt in range(max_retries):
+
+        # 重試策略：各錯誤類型持續約 2 分鐘
+        # 503/500：固定 2s；429/timeout：5→10→15→15... 封頂 15s
+        _STEP_WAITS = [5.0, 10.0, 15.0]  # 429 / timeout 遞增序列，之後封頂 15s
+
+        overload_attempt  = 0
+        ratelimit_elapsed = 0.0
+        ratelimit_attempt = 0
+        timeout_elapsed   = 0.0
+        timeout_attempt   = 0
+        _retry_printed    = False  # 是否用 \r 模式印過，成功時需補換行
+
+        while True:
+            if self.stop_flag:
+                if _retry_printed: print()
+                return 'ERR:已停止'
             self._respect_delay()
             try:
-                return self.client.ocr(img_b64, target_prompt)
+                if isinstance(self.client, OpenAICompatClient):
+                    result = self.client.ocr(img_b64, target_prompt, timeout=120, allow_array=allow_array)
+                else:
+                    result = self.client.ocr(img_b64, target_prompt, timeout=120)
+                if _retry_printed: print()  # 補換行讓後續 log 不亂
+                return result
             except Exception as e:
                 err = str(e)
-                if '429' in err or 'exhausted' in err.lower() or 'quota' in err.lower():
-                    wait = 1.5 * (attempt + 1)
-                    self.logger.warning(f"限速，暫停 {wait:.1f}s 重試 ({attempt+1}/{max_retries})...")
+                if '503' in err or 'unavailable' in err.lower() or '500' in err or 'internal server' in err.lower():
+                    overload_attempt += 1
+                    if overload_attempt > 24:
+                        print()  # 結束覆寫行
+                        break
+                    if overload_attempt == 1:
+                        self.logger.error(f"API服務不可用 ({err[:120]})，開始重試...")
+                    _retry_printed = True
+                    print(f"\r[WARNING] API服務不可用，5s 後重試 ({overload_attempt}/24)...   ", end='', flush=True)
+                    time.sleep(5.0)
+                elif '429' in err or 'exhausted' in err.lower() or 'quota' in err.lower():
+                    wait = _STEP_WAITS[min(ratelimit_attempt, len(_STEP_WAITS) - 1)]
+                    ratelimit_elapsed += wait
+                    ratelimit_attempt += 1
+                    if ratelimit_elapsed > 120:
+                        print()
+                        break
+                    _retry_printed = True
+                    print(f"\r[WARNING] 限速，{wait:.0f}s 後重試 ({ratelimit_attempt} 已等 {ratelimit_elapsed:.0f}s/120s)...   ", end='', flush=True)
                     time.sleep(wait)
                 elif 'timeout' in err.lower() or 'timed out' in err.lower():
-                    wait = 2.0 * (attempt + 1)
-                    self.logger.warning(f"請求逾時，暫停 {wait:.1f}s 重試 ({attempt+1}/{max_retries})...")
+                    wait = _STEP_WAITS[min(timeout_attempt, len(_STEP_WAITS) - 1)]
+                    timeout_elapsed += wait
+                    timeout_attempt += 1
+                    if timeout_elapsed > 120:
+                        print()
+                        break
+                    _retry_printed = True
+                    print(f"\r[WARNING] 請求逾時，{wait:.0f}s 後重試 ({timeout_attempt} 已等 {timeout_elapsed:.0f}s/120s)...   ", end='', flush=True)
                     time.sleep(wait)
                 elif 'Blocked' in err or 'PROHIBITED_CONTENT' in err:
                     return 'BLOCKED_BY_SAFETY'
@@ -298,7 +400,7 @@ class OCRLlm(OCRBase):
                     reason = self._explain_error(err)
                     self.logger.error(f"API錯誤：{reason}")
                     return f'ERR:{reason}'
-        reason = '配額耗盡/限速，重試耗盡'
+        reason = 'API重試耗盡'
         self.logger.error(reason)
         return f'ERR:{reason}'
 
@@ -324,6 +426,8 @@ class OCRLlm(OCRBase):
                                 visual_order: list = None) -> bool:
         try:
             clean = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+            # 移除 JSON 字串值內的原始控制字元（\x00-\x1f，排除合法的 \n \r \t）
+            clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', clean)
             results = json.loads(clean)
             if not isinstance(results, list) or not results:
                 return False
@@ -376,12 +480,14 @@ class OCRLlm(OCRBase):
 
     _GRID_PROMPT = (
         "This image is a grid of manga text box crops.\n"
-        "Each cell has a black label on its LEFT side showing its index number.\n"
+        "Each cell is bordered and has a black label on its LEFT side showing its index number.\n"
+        "CRITICAL: Each bordered cell is ONE independent text box. Do NOT merge text from different cells, even if they look visually related.\n"
         "Use the label numbers to identify each cell — do NOT count or guess order.\n"
         "Read the Japanese text in each cell and translate to Traditional Chinese.\n"
         "\n"
         "Translation rules:\n"
         "- Translate the original text directly. Do NOT add any parenthetical notes, explanations, or romanizations.\n"
+        "- Output EXACTLY one JSON entry per cell. The total number of entries MUST equal the total cells count.\n"
         "- Output ONLY a valid JSON array, one entry per cell:\n"
         '[{"index": 0, "direction": "v or h", "is_handwritten": false, "font_size_px": 24, "original": "...", "translation": "..."}, ...]\n'
         'direction: "v"=vertical/tategumi, "h"=horizontal/yokogumi.\n'
@@ -489,7 +595,7 @@ class OCRLlm(OCRBase):
         grid_img, visual_order = self._build_grid_img(img, blk_list)
         prompt = self._GRID_PROMPT.replace('{n}', str(len(blk_list)))
         for attempt in range(2):
-            resp = self._call_ocr(grid_img, custom_prompt=prompt)
+            resp = self._call_ocr(grid_img, custom_prompt=prompt, allow_array=True)
             if resp == 'BLOCKED_BY_SAFETY':
                 return '安全過濾器擋住', 0
             if resp.startswith('ERR:'):
@@ -507,7 +613,8 @@ class OCRLlm(OCRBase):
     _SLICE_PROMPT = (
         "Extract the Japanese text from this image and translate to Traditional Chinese. "
         "Line breaks: use the original text's line breaks as a loose reference — keep a line break in the translation only if it fits the natural meaning or rhythm. Do NOT add extra line breaks. "
-        "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\", \"is_handwritten\": false, \"font_size_px\": 24}. "
+        "Output ONLY valid JSON: {\"original\": \"...\", \"translation\": \"...\", \"direction\": \"v or h\", \"is_handwritten\": false, \"font_size_px\": 24}. "
+        "direction: \"v\"=vertical/tategumi, \"h\"=horizontal/yokogumi. "
         "is_handwritten: true if the text appears to be hand-drawn or artistic lettering (not a standard printed font). "
         "font_size_px: estimate the height of a single character in pixels. "
         "If the image contains NO TEXT, output an empty JSON {}."
@@ -543,6 +650,11 @@ class OCRLlm(OCRBase):
                 blk.text = [data['original']]
                 blk.translation = data.get('translation', '')
                 blk.obs.ocr_src_text = data['original']
+                llm_dir = data.get('direction', '').lower()
+                if llm_dir == 'v':
+                    blk.obs.ocr_says_vertical = True
+                elif llm_dir == 'h':
+                    blk.obs.ocr_says_vertical = False
                 blk.obs.ocr_is_handwritten = bool(data.get('is_handwritten', False))
                 blk.obs.ocr_font_size_px = float(data.get('font_size_px', -1))
                 self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK)
@@ -680,6 +792,60 @@ class OCRLlm(OCRBase):
             return
         self.logger.warning(f"{lp} Plan A：{result}")
 
+        # 若 Plan A 失敗原因是伺服器過載/逾時，Plan B 用同一個 API 也沒用，直接跳 Plan C
+        _server_overload = ('API重試耗盡' in result or '503' in result or
+                            'unavailable' in result.lower() or
+                            '請求逾時' in result or 'timeout' in result.lower())
+        if _server_overload:
+            self.logger.warning(f"{lp} 偵測到伺服器過載/逾時，跳過 Plan B 直接走 Plan C")
+            failed_indices = list(range(len(blk_list)))
+            ok, fail = 0, len(blk_list)
+            # 直接跳到 Plan C
+            if self._api_key_for(self.fallback_model):
+                h, w = img.shape[:2]
+                pad = 12
+                grok_client = self._build_fallback_client()
+                ok_c, fail_c = 0, 0
+                for i in failed_indices:
+                    blk = blk_list[i]
+                    bx1, by1, bx2, by2 = blk.xyxy
+                    crop = img[max(0,by1-pad):min(h,by2+pad),
+                               max(0,bx1-pad):min(w,bx2+pad)]
+                    try:
+                        resp = grok_client.ocr(_img_to_base64(crop), self._SLICE_PROMPT, timeout=120)
+                        clean = re.sub(r'```json\s*|\s*```', '', resp).strip()
+                        data = json.loads(clean)
+                        if isinstance(data, list): data = data[0] if data else {}
+                        if isinstance(data, dict) and data.get('original'):
+                            blk.text = [data['original']]
+                            blk.translation = data.get('translation', '')
+                            blk.obs.ocr_src_text = data['original']
+                            self._emit(OcrEventType.GROK_OK)
+                            ok_c += 1
+                            continue
+                    except Exception as e:
+                        self.logger.warning(f"{lp} Plan C(跳B) 框{i+1} 失敗: {self._explain_error(str(e))}")
+                    blk.text = ['●●●']
+                    blk.translation = ''
+                    fail_c += 1
+                    self._emit(OcrEventType.ERROR)
+                for blk in blk_list:
+                    resolve_blk_style(blk)
+                if fail_c == 0:
+                    self.logger.success(f"{lp} Plan C(跳B) 成功（{ok_c}/{len(failed_indices)} 框）")
+                else:
+                    self.logger.warning(f"{lp} Plan C(跳B) 完成（{ok_c}/{len(failed_indices)} 框，{fail_c} 框失敗）")
+                return
+            else:
+                for i in failed_indices:
+                    blk_list[i].text = ['●●●']
+                    blk_list[i].translation = ''
+                for blk in blk_list:
+                    resolve_blk_style(blk)
+                self.logger.error(f"{lp} 無備援API，此頁放棄")
+                self._emit(OcrEventType.ERROR)
+                return
+
         # Plan B：切片（含切片層級的 Grok 備援）
         result, ok, fail, failed_indices = self._run_slice_plan(img, blk_list, lp)
         if result == 'ok':
@@ -687,7 +853,15 @@ class OCRLlm(OCRBase):
             if fail == 0:
                 self.logger.success(f"{lp} Plan B 成功（{ok}/{total} 框）")
                 for blk in blk_list:
+                    self.logger.info(
+                        f"{lp} [PlanB resolve前] xyxy={blk.xyxy} "
+                        f"ocr_says_v={blk.obs.ocr_says_vertical}, "
+                        f"ctd_says_v={blk.obs.ctd_says_vertical}, "
+                        f"geo_v={blk.obs.geo_norm_v:.1f}, geo_h={blk.obs.geo_norm_h:.1f}, "
+                        f"vertical_before={blk.vertical}"
+                    )
                     resolve_blk_style(blk)
+                    self.logger.info(f"{lp} [PlanB resolve後] vertical_after={blk.vertical}")
                 return
             else:
                 self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")
@@ -695,7 +869,7 @@ class OCRLlm(OCRBase):
             self.logger.warning(f"{lp} Plan B：{result}")
 
         # Plan C：Grok 切片補救（只處理 Plan B 失敗的框）
-        if self.fallback_api_key and failed_indices:
+        if self._api_key_for(self.fallback_model) and failed_indices:
             h, w = img.shape[:2]
             pad = 12
             grok_client = self._build_fallback_client()
@@ -720,7 +894,7 @@ class OCRLlm(OCRBase):
                 except Exception as e:
                     self.logger.warning(f"{lp} Plan C 框{i+1} 失敗: {self._explain_error(str(e))}")
                 blk.text = ['●●●']
-                blk.translation = '●●●'
+                blk.translation = ''
                 fail += 1
                 self._emit(OcrEventType.ERROR)
             for blk in blk_list:
@@ -733,7 +907,7 @@ class OCRLlm(OCRBase):
             
         for i in failed_indices:
             blk_list[i].text = ['●●●']
-            blk_list[i].translation = '●●●'
+            blk_list[i].translation = ''
         for blk in blk_list:
             resolve_blk_style(blk)
         self.logger.error(f"{lp} 所有方案失敗，此頁放棄")

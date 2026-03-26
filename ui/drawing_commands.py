@@ -90,13 +90,15 @@ class RunBlkTransCommand(QUndoCommand):
         self.op_counter = -1
         self.blkitems = blkitems
         self.transpairw_list = transpairw_list
+        self.has_trans = set()  # 記錄哪些 blkitem 有寫入翻譯欄
 
         if mode < 3:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
-                if mode != 0:
-                    trs = blkitem.blk.translation
+                trs = blkitem.blk.translation
+                if mode != 0 or trs:
                     transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
                     blkitem.setPlainTextAndKeepUndoStack(trs)
+                    self.has_trans.add(id(blkitem))
                 blkitem.blk.rich_text = ''
                 if mode >= 0:
                     transpairw.e_source.setPlainTextAndKeepUndoStack(blkitem.blk.get_text())
@@ -155,7 +157,7 @@ class RunBlkTransCommand(QUndoCommand):
 
         if self.mode < 3:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
-                if self.mode != 0:
+                if id(blkitem) in self.has_trans:
                     transpairw.e_trans.redo()
                     blkitem.redo()
                 if self.mode >= 0:
@@ -180,7 +182,7 @@ class RunBlkTransCommand(QUndoCommand):
 
         if self.mode < 3:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
-                if self.mode != 0:
+                if id(blkitem) in self.has_trans:
                     transpairw.e_trans.undo()
                     blkitem.undo()
                 if self.mode >= 0:

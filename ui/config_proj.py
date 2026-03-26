@@ -57,6 +57,7 @@ class ProjImgTrans:
         self.img_array: np.ndarray = None
         self.mask_array: np.ndarray = None
         self.inpainted_array: np.ndarray = None
+        self.page_ocr_stats: dict = {}  # {imgname: {event_type: count}}
         if directory is not None:
             self.load(directory)
 
@@ -127,6 +128,7 @@ class ProjImgTrans:
                 self.not_found_pages[imname] = [TextBlock(**blk_dict) for blk_dict in page_dict[imname]]
         except Exception as e:
             raise ProjectNotSupportedException(e)
+        self.page_ocr_stats = proj_dict.get('page_ocr_stats', {})
         set_img_failed = False
         if 'current_img' in proj_dict:
             current_img = proj_dict['current_img']
@@ -221,6 +223,7 @@ class ProjImgTrans:
             'directory': self.directory,
             'pages': pages,
             'current_img': self.current_img,
+            'page_ocr_stats': self.page_ocr_stats,
         }
 
     def read_img(self, imgname: str) -> np.ndarray:

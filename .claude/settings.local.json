@@ -9,7 +9,12 @@
       "Bash(find f:/BallonsTranslator-git/ui -name \"__pycache__\" -type d -exec rm -rf {} +)",
       "Bash(xargs grep:*)",
       "Bash(powershell -NoProfile -File \"C:\\\\Users\\\\yee\\\\.claude\\\\notify_sound.ps1\")",
-      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\yee\\\\.claude\\\\notify_sound.ps1\")"
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\yee\\\\.claude\\\\notify_sound.ps1\")",
+      "Bash(find H:Download -maxdepth 3 -name *hitomi* -type f)",
+      "Read(//c/Users/yee/**)",
+      "Bash(find f:/BallonsTranslator-git -name \"*.py\" -type f -exec grep -l \"class.*ImgTransProj\\\\|imgtrans_proj\" {})",
+      "Bash(grep -n \"class.*OCR\\\\|class.*Detector\\\\|class.*Inpainter\" /f/BallonsTranslator-git/modules/ocr/*.py /f/BallonsTranslator-git/modules/inpaint/*.py /f/BallonsTranslator-git/modules/textdetector/*.py)",
+      "Bash(grep -n \"def _detect\\\\|def detect\" /f/BallonsTranslator-git/modules/textdetector/detector_*.py)"
     ]
   }
 }

@@ -375,6 +375,8 @@ class ImgtransThread(QThread):
 
         self._stop_flag = False
         self._pause_event.set()
+        if self.ocr is not None and hasattr(self.ocr, 'stop_flag'):
+            self.ocr.stop_flag = False
 
         for imgname in pages_to_run:
             # ── 暫停：等到 resume ──────────────────────────────
@@ -558,10 +560,10 @@ def merge_config_module_params(config_params: Dict, module_keys: List, get_modul
                     cparam = cfg_param[mk]
                     if isinstance(mparam, dict):
                         if 'type' in mparam and mparam['type'] == 'selector' \
-                            and cfg_param[mk]['options'] != mparam['options']:
+                            and cfg_param[mk].get('options') != mparam['options']:
                             LOGGER.info(f'Update {mk} options')
                             cfg_param[mk]['options'] = mparam['options']
-                        if 'type' in mparam and mparam['type'] != cparam['type']:
+                        if 'type' in mparam and mparam['type'] != cparam.get('type'):
                             cparam['type'] = mparam['type']
                         for k in mparam:
                             if k not in cparam:
@@ -792,6 +794,8 @@ class ModuleManager(QObject):
         """暫停：等目前頁跑完後中斷，記錄位置，殺彈窗，清顯存"""
         self.imgtrans_thread._stop_flag = True
         self.imgtrans_thread._pause_event.set()
+        if self.ocr is not None and hasattr(self.ocr, 'stop_flag'):
+            self.ocr.stop_flag = True
         self.terminateRunningThread()
         self.progress_msgbox.hide()
         soft_empty_cache()
@@ -802,6 +806,8 @@ class ModuleManager(QObject):
         self.imgtrans_thread.last_stopped_imgname = None
         self.imgtrans_thread._stop_flag = True
         self.imgtrans_thread._pause_event.set()
+        if self.ocr is not None and hasattr(self.ocr, 'stop_flag'):
+            self.ocr.stop_flag = True
         self.terminateRunningThread()
         self.progress_msgbox.hide()
         soft_empty_cache()

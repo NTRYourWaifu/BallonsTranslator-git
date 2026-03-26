@@ -57,6 +57,18 @@ _SVG_RESTART = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
   <polygon points="3,7 8,12 3,17" fill="#cccccc"/>
 </svg>'''
 
+_SVG_MEASURE_FONT = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <rect x="3" y="13" width="18" height="2" fill="#cccccc"/>
+  <rect x="3" y="5" width="2" height="6" fill="#cccccc"/>
+  <rect x="9.5" y="5" width="2" height="8" fill="#cccccc"/>
+  <rect x="16" y="5" width="2" height="4" fill="#cccccc"/>
+</svg>'''
+
+_SVG_APPLY_FONT = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <text x="2" y="17" font-size="15" fill="#cccccc" font-family="serif" font-weight="bold">Aa</text>
+  <polyline points="14,15 17,19 22,11" stroke="#88cc88" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>'''
+
 
 if C.FLAG_QT6:
     from qtpy.QtGui import QAction
@@ -260,6 +272,18 @@ class LeftBar(Widget):
         self.resumeHereBtn.setIconSize(self.resumeHereBtn.size())
         self.resumeHereBtn.setToolTip(self.tr('從當前頁繼續'))
 
+        self.measureFontBtn = QPushButton()
+        self.measureFontBtn.setFixedSize(btn_size, btn_size)
+        self.measureFontBtn.setIcon(_svg_icon(_SVG_MEASURE_FONT, btn_size))
+        self.measureFontBtn.setIconSize(self.measureFontBtn.size())
+        self.measureFontBtn.setToolTip(self.tr('量測字型佔比（當前頁）'))
+
+        self.applyFontScaleBtn = QPushButton()
+        self.applyFontScaleBtn.setFixedSize(btn_size, btn_size)
+        self.applyFontScaleBtn.setIcon(_svg_icon(_SVG_APPLY_FONT, btn_size))
+        self.applyFontScaleBtn.setIconSize(self.applyFontScaleBtn.size())
+        self.applyFontScaleBtn.setToolTip(self.tr('套用字型係數（當前頁）'))
+
         vlayout = QVBoxLayout(self)
         vlayout.addWidget(openBtnToolBar)
         vlayout.addWidget(self.showPageListLabel)
@@ -269,6 +293,8 @@ class LeftBar(Widget):
         vlayout.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
         vlayout.addWidget(self.stopBtn)
         vlayout.addWidget(self.resumeHereBtn)
+        vlayout.addWidget(self.measureFontBtn)
+        vlayout.addWidget(self.applyFontScaleBtn)
         vlayout.addWidget(self.configChecker)
         vlayout.addWidget(self.runImgtransBtn)
         vlayout.setContentsMargins(padding, 0, padding, int(LEFTBTN_WIDTH / 2))

@@ -17,11 +17,15 @@ TEXTRECT_SHOW_COLOR = QColor(30, 147, 229, 170)
 TEXTRECT_SELECTED_COLOR = QColor(248, 64, 147, 170)
 
 
-def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0) -> float:
+def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0,
+                             img_h: float = 0,
+                             char_scale_table: list = None) -> float:
     """
     用 offscreen 渲染二分搜尋，找出讓譯文剛好填入 YOLO 框的最大字體大小（pt）。
     若框面積為 0 或譯文為空，回傳 blk.fontformat.font_size（維持原值）。
-    scale: 最終字體大小縮放係數，1.0 = 不縮放
+    scale            : 最終字體大小縮放係數，1.0 = 不縮放
+    img_h            : 整張圖片高度（px），用來計算字體佔比
+    char_scale_table : [(n_chars, threshold, coeff), ...] 依字數對應閾值與縮放係數
     """
     translation = blk.translation
     if not translation or not translation.strip():
@@ -80,7 +84,22 @@ def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0) -> float:
         best = pt
         pt += step
 
-    return pt2px(best * scale)
+    # ── 字體佔比上限縮放 ──────────────────────────────────────
+    extra_scale = 1.0
+    if char_scale_table and img_h > 0:
+        best_px = pt2px(best)
+        font_ratio = best_px / img_h
+        n_chars = len(translation.replace('\n', '').replace(' ', ''))
+        # 找對應字數段的 (閾值, 係數)，預設用最後一段
+        threshold, coeff = char_scale_table[-1][1], char_scale_table[-1][2]
+        for n_thresh, thr, cf in char_scale_table:
+            if n_chars <= n_thresh:
+                threshold, coeff = thr, cf
+                break
+        if font_ratio > threshold:
+            extra_scale = coeff
+
+    return pt2px(best * scale * extra_scale)
 
 
 class TextBlkItem(QGraphicsTextItem):

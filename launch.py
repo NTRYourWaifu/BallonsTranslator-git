@@ -132,7 +132,8 @@ def restart():
     global BT
     print('restarting...\n')
     BT.close()
-    os.execv(sys.executable, ['python'] + sys.argv)
+    subprocess.Popen([sys.executable] + sys.argv)
+    sys.exit(0)
 
 
 def main():

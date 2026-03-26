@@ -365,6 +365,8 @@ class MainWindow(mainwindow_cls):
         self.leftBar.run_imgtrans.connect(self.on_run_imgtrans)
         self.leftBar.stopBtn.clicked.connect(self.on_stop_imgtrans)
         self.leftBar.resumeHereBtn.clicked.connect(self.on_resume_here)
+        self.leftBar.measureFontBtn.clicked.connect(self.on_measure_font_ratio)
+        self.leftBar.applyFontScaleBtn.clicked.connect(self.on_apply_font_scale)
         self.bottomBar.inpaint_btn_clicked.connect(self.inpaintBtnClicked)
         self.bottomBar.translatorStatusbtn.clicked.connect(self.translatorStatusBtnPressed)
         self.bottomBar.transTranspageBtn.run_target.connect(self.on_transpagebtn_pressed)
@@ -508,6 +510,8 @@ class MainWindow(mainwindow_cls):
             self.pageList.addItem(lstitem)
             if imgname in folder_cache:
                 lstitem.setData(ROLE_PAGE_OCR, folder_cache[imgname])
+            elif imgname in self.imgtrans_proj.page_ocr_stats:
+                lstitem.setData(ROLE_PAGE_OCR, self.imgtrans_proj.page_ocr_stats[imgname])
             if imgname == self.imgtrans_proj.current_img:
                 self.pageList.setCurrentItem(lstitem)
 
@@ -1019,6 +1023,14 @@ class MainWindow(mainwindow_cls):
     def _prepare_imgtrans_run(self, start_from: str = None, reset_stats: bool = True):
         """on_run_imgtrans 的前置工作，支援從指定頁開始"""
         self.backup_blkstyles.clear()
+        if reset_stats:
+            self.imgtrans_proj.page_ocr_stats.clear()
+            folder = self.imgtrans_proj.directory
+            if folder:
+                self._page_ocr_cache.pop(str(folder), None)
+            for i in range(self.pageList.count()):
+                self.pageList.item(i).setData(ROLE_PAGE_OCR, None)
+            self.pageList.viewport().update()
         if self.bottomBar.textblockChecker.isChecked():
             self.bottomBar.textblockChecker.click()
         self.postprocess_mt_toggle = False
@@ -1163,7 +1175,12 @@ class MainWindow(mainwindow_cls):
                         from ui.textitem import calc_font_size_by_render
                         _ocr = self.module_manager.ocr_thread.ocr
                         _scale = _ocr.font_size_scale if _ocr is not None and hasattr(_ocr, 'font_size_scale') else 1.0
-                        blk.font_size = calc_font_size_by_render(blk, scale=_scale)
+                        _char_scale_table = _ocr.char_scale_table if _ocr is not None and hasattr(_ocr, 'char_scale_table') else None
+                        _img = self.imgtrans_proj.img_array
+                        _img_h = float(_img.shape[0]) if _img is not None else 0
+                        blk.font_size = calc_font_size_by_render(blk, scale=_scale,
+                                                                  img_h=_img_h,
+                                                                  char_scale_table=_char_scale_table)
 
             # 手寫字型過大警告（實際渲染 pt 超過 LLM 估算 px 換算值的比例才警告）
             ocr = self.module_manager.ocr_thread.ocr
@@ -1197,6 +1214,8 @@ class MainWindow(mainwindow_cls):
                         folder_cache = self._page_ocr_cache.setdefault(str(folder), {})
                         img_cache = folder_cache.setdefault(bname, {})
                         img_cache[OcrEventType.FONT_WARN] = img_cache.get(OcrEventType.FONT_WARN, 0) + warn_count
+                        proj_stats = self.imgtrans_proj.page_ocr_stats.setdefault(bname, {})
+                        proj_stats[OcrEventType.FONT_WARN] = proj_stats.get(OcrEventType.FONT_WARN, 0) + warn_count
                     # 更新底部 stats bar
                     if self.bottomBar.ocr_stats_bar is not None:
                         for _ in range(warn_count):
@@ -1301,6 +1320,72 @@ class MainWindow(mainwindow_cls):
         if not current:
             return
         self._prepare_imgtrans_run(start_from=current)
+
+    def on_measure_font_ratio(self):
+        """量測當前頁所有文字框的字型佔比，每框都輸出 log（不修改任何值）"""
+        _img = self.imgtrans_proj.img_array
+        if _img is None:
+            LOGGER.warning('[量測] 無圖片，請先開啟一頁')
+            return
+        img_h = float(_img.shape[0])
+        _ocr = self.module_manager.ocr_thread.ocr
+        _logger = _ocr.logger if _ocr is not None and hasattr(_ocr, 'logger') else LOGGER
+        _logger.info(f'[量測] 圖片高={int(img_h)}px，共 {len(self.st_manager.textblk_item_list)} 框')
+        for blkitem in self.st_manager.textblk_item_list:
+            blk = blkitem.blk
+            trans = blk.translation or ''
+            if not trans.strip():
+                continue
+            clean = trans.replace('\n', '').replace(' ', '')
+            preview = clean[:10]
+            n_chars = len(clean)
+            font_ratio = blk.font_size / img_h if img_h > 0 else 0
+            prefix = f'字數={n_chars:<3} | 佔比={font_ratio:.2%} | fs={blk.font_size:.1f}px'
+            _logger.info(f'[量測] {prefix}  {preview!r}')
+
+    def on_apply_font_scale(self):
+        """對當前頁套用字型係數算法，僅輸出被修改的框"""
+        _img = self.imgtrans_proj.img_array
+        if _img is None:
+            LOGGER.warning('[套用] 無圖片，請先開啟一頁')
+            return
+        img_h = float(_img.shape[0])
+        _ocr = self.module_manager.ocr_thread.ocr
+        _logger = _ocr.logger if _ocr is not None and hasattr(_ocr, 'logger') else LOGGER
+        _scale = _ocr.font_size_scale if _ocr is not None and hasattr(_ocr, 'font_size_scale') else 1.0
+        _char_scale_table = _ocr.char_scale_table if _ocr is not None and hasattr(_ocr, 'char_scale_table') else None
+        changed = 0
+        for blkitem in self.st_manager.textblk_item_list:
+            blk = blkitem.blk
+            trans = blk.translation or ''
+            if not trans.strip():
+                continue
+            old_fs = blk.font_size
+            # 直接在 old_fs 上套係數，不重新搜尋最大字體
+            extra_scale = 1.0
+            triggered_threshold = 0.0
+            if _char_scale_table and img_h > 0:
+                font_ratio = old_fs / img_h
+                n_chars = len(trans.replace('\n', '').replace(' ', ''))
+                threshold, coeff = _char_scale_table[-1][1], _char_scale_table[-1][2]
+                for n_thresh, thr, cf in _char_scale_table:
+                    if n_chars <= n_thresh:
+                        threshold, coeff = thr, cf
+                        break
+                if font_ratio > threshold:
+                    extra_scale = coeff
+                    triggered_threshold = threshold
+            new_fs = old_fs * _scale * extra_scale
+            if abs(new_fs - old_fs) > 0.1:
+                blkitem.setFontSize(new_fs)
+                blk.font_size = new_fs
+                preview = trans.replace('\n', '').replace(' ', '')[:10]
+                ratio = old_fs / img_h if img_h > 0 else 0
+                prefix = f'{old_fs:.1f}px -> {new_fs:.1f}px | 佔比={ratio:.2%} > {triggered_threshold:.2%}'
+                _logger.info(f'[套用] {prefix}  {preview!r}')
+                changed += 1
+        self.canvas.update()
+        _logger.info(f'[套用] 完成，共修改 {changed} 框')
 
     def on_transpanel_changed(self):
         self.canvas.editor_index = self.rightComicTransStackPanel.currentIndex()
@@ -1456,6 +1541,8 @@ class MainWindow(mainwindow_cls):
                 folder_cache = self._page_ocr_cache.setdefault(str(folder), {})
                 img_cache = folder_cache.setdefault(imgname, {})
                 img_cache[event_type] = img_cache.get(event_type, 0) + 1
+                proj_stats = self.imgtrans_proj.page_ocr_stats.setdefault(imgname, {})
+                proj_stats[event_type] = proj_stats.get(event_type, 0) + 1
 
     def on_fin_export_doc(self):
         msg = QMessageBox()
