@@ -723,11 +723,11 @@ def resolve_blk_style(blk: TextBlock, font_size_ratio: float = 1.0) -> None:
         main_axis = box_h if blk.vertical else box_w
         fs_guess = obs.yolo_col_width if 0 < obs.yolo_col_width < cross_axis * 0.95 else cross_axis / 2.0
         fs = fs_guess
+        import math, re
         for _ in range(2):
             if fs <= 0:
                 break
             chars_per_line = max(1, int(main_axis / fs))
-            import math, re
             lines_seg = obs.ocr_src_text.split('\n')
             n = sum(math.ceil(max(len(re.sub(r'\s', '', s)), 1) / chars_per_line) for s in lines_seg)
             n = max(n, 1)

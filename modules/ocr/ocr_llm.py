@@ -773,7 +773,7 @@ class OCRLlm(OCRBase):
 
     # ── 主流程 ────────────────────────────────────────────────
     def _ocr_blk_list(self, img: np.ndarray, blk_list: List[TextBlock],
-                       *args, **kwargs):
+                       *args, force_slice=False, **kwargs):
         if self.client is None or not blk_list:
             return
 
@@ -782,18 +782,19 @@ class OCRLlm(OCRBase):
 
         sorted_blks = self._sort_blk_reading_order(blk_list)
 
-        # Plan A：原圖全頁
-        result, matched = self._run_fullpage(img, sorted_blks)
-        if result == 'ok':
-            self._emit(OcrEventType.PLAN_A_OK)
-            self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
-            for blk in blk_list:
-                resolve_blk_style(blk)
-            return
-        self.logger.warning(f"{lp} Plan A：{result}")
+        # Plan A：原圖全頁（force_slice=True 時跳過）
+        if not force_slice:
+            result, matched = self._run_fullpage(img, sorted_blks)
+            if result == 'ok':
+                self._emit(OcrEventType.PLAN_A_OK)
+                self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
+                for blk in blk_list:
+                    resolve_blk_style(blk)
+                return
+            self.logger.warning(f"{lp} Plan A：{result}")
 
         # 若 Plan A 失敗原因是伺服器過載/逾時，Plan B 用同一個 API 也沒用，直接跳 Plan C
-        _server_overload = ('API重試耗盡' in result or '503' in result or
+        _server_overload = not force_slice and ('API重試耗盡' in result or '503' in result or
                             'unavailable' in result.lower() or
                             '請求逾時' in result or 'timeout' in result.lower())
         if _server_overload:
@@ -861,7 +862,12 @@ class OCRLlm(OCRBase):
                         f"vertical_before={blk.vertical}"
                     )
                     resolve_blk_style(blk)
-                    self.logger.info(f"{lp} [PlanB resolve後] vertical_after={blk.vertical}")
+                    self.logger.info(
+                        f"{lp} [PlanB resolve後] vertical={blk.vertical} "
+                        f"font_size={blk.font_size:.1f}px "
+                        f"geo_line_count={blk.obs.geo_line_count} "
+                        f"ocr_src_text={blk.obs.ocr_src_text!r}"
+                    )
                 return
             else:
                 self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")

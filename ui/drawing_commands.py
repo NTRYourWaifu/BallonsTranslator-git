@@ -8,6 +8,7 @@ except:
 from typing import Union, Tuple, List
 import numpy as np
 from utils.logger import logger
+from utils.fontformat import px2pt
 
 from .image_edit import ImageEditMode, PixmapItem, DrawingLayer, StrokeImgItem
 from .canvas import Canvas, TextBlkItem
@@ -102,6 +103,12 @@ class RunBlkTransCommand(QUndoCommand):
                 blkitem.blk.rich_text = ''
                 if mode >= 0:
                     transpairw.e_source.setPlainTextAndKeepUndoStack(blkitem.blk.get_text())
+                    blkitem.setVertical(blkitem.blk.vertical)
+                    from ui.textitem import calc_font_size_by_render
+                    blkitem.blk.font_size = calc_font_size_by_render(blkitem.blk)
+                    blkitem.setFontSize(px2pt(blkitem.blk.font_size))
+                    if blkitem.blk.angle != 0:
+                        blkitem.setRotation(blkitem.blk.angle)
 
         self.canvas = canvas
         self.mode = mode
