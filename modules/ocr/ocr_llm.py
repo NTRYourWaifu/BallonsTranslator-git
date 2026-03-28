@@ -28,7 +28,7 @@ class OcrEventType:
 
 
 class OcrStatsSignals(QObject):
-    event = Signal(str)
+    event = Signal(str, str)   # (event_type, imgname)
 
 
 # ── 圖片工具 ──────────────────────────────────────────────────
@@ -268,7 +268,7 @@ class OCRLlm(OCRBase):
 
     # ── 統計事件 ──────────────────────────────────────────────
     def _emit(self, event_type: str):
-        self.stats_signals.event.emit(event_type)
+        self.stats_signals.event.emit(event_type, self.current_imgname)
 
     # ── 客戶端 ────────────────────────────────────────────────
     def _api_key_for(self, model: str) -> str:
@@ -453,6 +453,10 @@ class OCRLlm(OCRBase):
             clean = re.sub(r'```json\s*|\s*```', '', response_text).strip()
             # 移除 JSON 字串值內的原始控制字元（\x00-\x1f，排除合法的 \n \r \t）
             clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', clean)
+            # 將 JSON 字串值內的裸換行符轉成合法的 \n 逸脫（LLM 偶爾直接換行而非輸出 \\n）
+            clean = re.sub(r'"((?:[^"\\]|\\.)*)"',
+                           lambda m: '"' + m.group(1).replace('\n', '\\n').replace('\r', '\\r') + '"',
+                           clean)
             results = json.loads(clean)
             if not isinstance(results, list) or not results:
                 return False
@@ -893,20 +897,7 @@ class OCRLlm(OCRBase):
             if fail == 0:
                 self.logger.success(f"{lp} Plan B 成功（{ok}/{total} 框）")
                 for blk in blk_list:
-                    self.logger.info(
-                        f"{lp} [PlanB resolve前] xyxy={blk.xyxy} "
-                        f"ocr_says_v={blk.obs.ocr_says_vertical}, "
-                        f"ctd_says_v={blk.obs.ctd_says_vertical}, "
-                        f"geo_v={blk.obs.geo_norm_v:.1f}, geo_h={blk.obs.geo_norm_h:.1f}, "
-                        f"vertical_before={blk.vertical}"
-                    )
                     resolve_blk_style(blk)
-                    self.logger.info(
-                        f"{lp} [PlanB resolve後] vertical={blk.vertical} "
-                        f"font_size={blk.font_size:.1f}px "
-                        f"geo_line_count={blk.obs.geo_line_count} "
-                        f"ocr_src_text={blk.obs.ocr_src_text!r}"
-                    )
                 return
             else:
                 self.logger.warning(f"{lp} Plan B 完成（{ok}/{total} 框，{fail} 框失敗）")

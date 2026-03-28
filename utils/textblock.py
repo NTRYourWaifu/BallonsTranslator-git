@@ -689,8 +689,13 @@ def examine_textblk(blk: TextBlock, im_w: int, im_h: int, sort: bool = False) ->
 
 def resolve_blk_style(blk: TextBlock, font_size_ratio: float = 1.0) -> None:
     """
-    pipeline 末端唯一的計算點。
-    讀取 blk.obs 裡所有原始觀測值，統一決定 vertical 和 font_size。
+    OCR 階段的幾何估算點（非最終值）。
+    讀取 blk.obs 裡所有原始觀測值，統一決定 vertical 和 font_size 初始值。
+
+    ⚠️  此處的 font_size 只是初步估算，不是最終答案。
+    真正的最終字體大小在翻譯完成後，由 ui/textitem.py 的
+    calc_font_size_by_render() 透過 offscreen 渲染二分搜尋決定，
+    並額外套用 char_scale_table 係數縮放。
     """
     if isinstance(blk.obs, dict):
         blk.obs = RawObservations(**blk.obs)

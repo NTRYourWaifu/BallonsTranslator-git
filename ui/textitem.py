@@ -21,11 +21,24 @@ def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0,
                              img_h: float = 0,
                              char_scale_table: list = None) -> float:
     """
-    用 offscreen 渲染二分搜尋，找出讓譯文剛好填入 YOLO 框的最大字體大小（pt）。
+    ★ 字體大小最終決定點 ★  （在翻譯完成後、渲染前呼叫）
+
+    用 offscreen Qt 渲染 + 線性掃描（8pt 起，每步 0.5pt），找出讓譯文
+    剛好填滿 YOLO 框的最大字體大小。
+    scale 與 char_scale_table 都在本函數內部一併套用，回傳值即為最終 px，
+    呼叫方直接寫入 blk.font_size，不需再做任何縮放。
     若框面積為 0 或譯文為空，回傳 blk.fontformat.font_size（維持原值）。
-    scale            : 最終字體大小縮放係數，1.0 = 不縮放
-    img_h            : 整張圖片高度（px），用來計算字體佔比
-    char_scale_table : [(n_chars, threshold, coeff), ...] 依字數對應閾值與縮放係數
+
+    scale            : font_size_scale 參數，整體縮放係數（1.0 = 不縮放）
+    img_h            : 整張圖片高度（px），用來計算字體佔圖高比
+    char_scale_table : [(n_chars, threshold, coeff), ...]
+                       依譯文字數查表，若字體佔比超過 threshold 則乘以 coeff 縮小，
+                       避免少字時字型過大。（來自 ocr_llm.py 的 char_scale_table 參數）
+
+    流水線：
+        resolve_blk_style()        → OCR 幾何初估（非最終）
+        翻譯
+        calc_font_size_by_render() → 本函數，scale + char_scale_table 一起算，最終值
     """
     translation = blk.translation
     if not translation or not translation.strip():
@@ -99,7 +112,8 @@ def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0,
         if font_ratio > threshold:
             extra_scale = coeff
 
-    return pt2px(best * scale * extra_scale)
+    result_px = pt2px(best * scale * extra_scale)
+    return result_px
 
 
 class TextBlkItem(QGraphicsTextItem):

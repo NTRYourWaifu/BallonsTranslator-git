@@ -264,6 +264,7 @@ class ImgtransThread(QThread):
     finish_blktrans_stage = Signal(str, int)
     finish_blktrans = Signal(int, list)
     unload_modules = Signal(list)
+    page_ocr_trans_done = Signal(str)   # imgname，OCR（+翻譯）真正完成後 emit
 
     detect_counter = 0
     ocr_counter = 0
@@ -290,6 +291,8 @@ class ImgtransThread(QThread):
         self.start_from_imgname: str = None   # None = 從頭跑
         self.last_stopped_imgname: str = None  # 記錄上次停在哪
         self.page_start_offset: int = 0
+        self._ocr_counter_lock = threading.Lock()
+        self._translate_counter_lock = threading.Lock()
 
     @property
     def textdetector(self) -> TextDetectorBase:
@@ -375,15 +378,22 @@ class ImgtransThread(QThread):
         # ── 啟動背景 OCR Worker（非 low_vram）──
         import queue as _queue
         ocr_queue = _queue.Queue()
-        ocr_worker = None
+        ocr_workers = []
         need_bg_ocr = (cfg_module.enable_ocr or cfg_module.enable_translate) and not low_vram_trans
         if need_bg_ocr:
-            ocr_worker = threading.Thread(
-                target=self._ocr_translate_worker,
-                args=(ocr_queue,),
-                daemon=True
-            )
-            ocr_worker.start()
+            if self.ocr is not None and self.ocr.is_computational_intensive():
+                num_ocr_workers = 1
+            else:
+                num_ocr_workers = max(1, cfg_module.ocr_max_workers)
+            worker_start_delay = getattr(self.ocr, 'delay', 0.0) if self.ocr is not None else 0.0
+            for i in range(num_ocr_workers):
+                w = threading.Thread(
+                    target=self._ocr_translate_worker,
+                    args=(ocr_queue, i * worker_start_delay),
+                    daemon=True
+                )
+                w.start()
+                ocr_workers.append(w)
 
         # ── Phase 1：detect + inpaint（快速迴圈）──
         for imgname in pages_to_run:
@@ -433,9 +443,11 @@ class ImgtransThread(QThread):
                 ocr_queue.put(imgname)
 
         # ── 等待背景 Worker 完成 ──
-        if ocr_worker is not None:
-            ocr_queue.put(None)  # sentinel
-            ocr_worker.join()
+        if ocr_workers:
+            for _ in range(len(ocr_workers)):
+                ocr_queue.put(None)  # 每個 worker 各需一個 sentinel
+            for w in ocr_workers:
+                w.join()
 
         # ── Low VRAM 模式：Phase 1 完成後順序處理 OCR + 翻譯 ──
         if low_vram_trans:
@@ -459,8 +471,10 @@ class ImgtransThread(QThread):
                     self.translate_counter += 1
                     self.update_translate_progress.emit(self.translate_counter)
 
-    def _ocr_translate_worker(self, ocr_queue):
+    def _ocr_translate_worker(self, ocr_queue, start_delay: float = 0.0):
         """背景執行緒：逐頁 OCR + 翻譯，不阻塞 Phase 1 的 detect/inpaint。"""
+        if start_delay > 0:
+            time.sleep(start_delay)
         import queue as _queue
         while True:
             try:
@@ -483,8 +497,14 @@ class ImgtransThread(QThread):
                     self.translator.translate_textblk_lst(blk_list)
                 except Exception as e:
                     create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
-                self.translate_counter += 1
-                self.update_translate_progress.emit(self.translate_counter)
+                with self._translate_counter_lock:
+                    self.translate_counter += 1
+                    local_count = self.translate_counter
+                self.update_translate_progress.emit(local_count)
+
+            # OCR（+翻譯）都完成後，用 imgname 通知主執行緒做字體計算
+            if not self._stop_flag and cfg_module.enable_ocr:
+                self.page_ocr_trans_done.emit(imgname)
 
     def _do_ocr_page(self, imgname):
         """單頁 OCR + restore_ocr_empty 處理。"""
@@ -524,8 +544,10 @@ class ImgtransThread(QThread):
                         if inpainted is not None:
                             self.imgtrans_proj.save_inpainted(imgname, inpainted)
 
-        self.ocr_counter += 1
-        self.update_ocr_progress.emit(self.ocr_counter)
+        with self._ocr_counter_lock:
+            self.ocr_counter += 1
+            local_count = self.ocr_counter
+        self.update_ocr_progress.emit(local_count)
 
     def detect_finished(self) -> bool:
         if self.imgtrans_proj is None:
@@ -1067,7 +1089,7 @@ class ModuleManager(QObject):
             LOGGER.info('OCR set to {}'.format(self.ocr.name))
             # 綁定 stats_signals（每次換 OCR 模組都重新綁）
             if self.ocr_stats_bar is not None and hasattr(self.ocr, 'stats_signals'):
-                self.ocr.stats_signals.event.connect(self.ocr_stats_bar._on_event)
+                self.ocr.stats_signals.event.connect(self.ocr_stats_bar._on_event2)
             if self.ocr_event_callback is not None and hasattr(self.ocr, 'stats_signals'):
                 self.ocr.stats_signals.event.connect(self.ocr_event_callback)
 

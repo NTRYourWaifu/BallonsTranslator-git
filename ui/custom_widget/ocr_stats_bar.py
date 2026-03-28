@@ -199,3 +199,9 @@ class OcrStatsBar(Widget):
     def _on_event(self, event_type: str):
         if event_type in self._icons:
             self._icons[event_type].increment()
+
+    @Slot(str, str)
+    def _on_event2(self, event_type: str, _imgname: str):
+        """接受雙參數版 signal（OcrStatsSignals.event = Signal(str, str)）"""
+        if event_type in self._icons:
+            self._icons[event_type].increment()

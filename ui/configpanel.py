@@ -391,6 +391,10 @@ class ConfigPanel(Widget):
         dlConfigPanel.addTextLabel(label_text_ocr)
         self.ocr_config_panel = OCRConfigPanel(self.tr('OCR'), scrollWidget=self)
         self.ocr_sub_block = dlConfigPanel.addBlockWidget(self.ocr_config_panel)
+        self.ocr_max_workers_edit, _ = dlConfigPanel.addLineEdit(self.tr('OCR Parallel Workers'), self.tr('Number of parallel OCR workers (API-based OCR only, local models always use 1)'))
+        self.ocr_max_workers_edit.setFixedWidth(CONFIG_COMBOBOX_SHORT)
+        self.ocr_max_workers_edit.setValidator(CustomIntValidator(1, 16, 2))
+        self.ocr_max_workers_edit.editingFinished.connect(self.on_ocr_max_workers_changed)
 
         dlConfigPanel.addTextLabel(label_inpaint)
         self.inpaint_config_panel = InpaintConfigPanel(self.tr('Inpainter'), scrollWidget=self)
@@ -507,6 +511,11 @@ class ConfigPanel(Widget):
     def on_runcache_changed(self):
         pcfg.module.empty_runcache = self.empty_runcache_checker.isChecked()
 
+    def on_ocr_max_workers_changed(self):
+        text = self.ocr_max_workers_edit.text()
+        if text.isnumeric():
+            pcfg.module.ocr_max_workers = max(1, int(text))
+
     def addConfigBlock(self, header: str) -> Tuple[ConfigBlock, TableItem]:
         cb = ConfigBlock(header, parent=self)
         cb.sublock_pressed.connect(self.onSublockPressed)
@@ -616,5 +625,6 @@ class ConfigPanel(Widget):
         self.rst_imgquality_edit.setText(str(pcfg.imgsave_quality))
         self.load_model_checker.setChecked(pcfg.module.load_model_on_demand)
         self.empty_runcache_checker.setChecked(pcfg.module.empty_runcache)
+        self.ocr_max_workers_edit.setText(str(pcfg.module.ocr_max_workers))
 
         self.blockSignals(False)

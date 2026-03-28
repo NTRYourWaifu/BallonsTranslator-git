@@ -27,6 +27,7 @@ class ModuleConfig(Config):
     check_need_inpaint: bool = True
     load_model_on_demand: bool = False
     empty_runcache: bool = False
+    ocr_max_workers: int = 2
 
     def get_params(self, module_key: str) -> dict:
         return self[module_key + '_params']
