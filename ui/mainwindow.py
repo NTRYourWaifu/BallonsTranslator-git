@@ -111,13 +111,13 @@ class PageListView(QListWidget):
 
         return super().contextMenuEvent(e)
 
-    def updatePageOcrStatus(self, imgname: str, event_type: str):
+    def updatePageOcrStatus(self, imgname: str, event_type: str, count: int = 1):
         """累計某頁的 OCR 事件計數（只加不清）"""
         for i in range(self.count()):
             item = self.item(i)
             if item.text() == imgname:
                 stats = dict(item.data(ROLE_PAGE_OCR) or {})
-                stats[event_type] = stats.get(event_type, 0) + 1
+                stats[event_type] = stats.get(event_type, 0) + count
                 item.setData(ROLE_PAGE_OCR, stats)
                 self.viewport().update()
                 return
@@ -1203,7 +1203,7 @@ class MainWindow(mainwindow_cls):
                 if warn_count > 0:
                     bname = osp.basename(imgname)
                     # 更新圖片列表圖標（用 imgname 而非 ocr.current_imgname，避免批量時頁面已切換）
-                    self.pageList.updatePageOcrStatus(bname, OcrEventType.FONT_WARN)
+                    self.pageList.updatePageOcrStatus(bname, OcrEventType.FONT_WARN, warn_count)
                     # 更新佇列資料夾統計（每個觸發警告的對話框各 +1）
                     if self._gui_batch_running and self._gui_batch_current:
                         for _ in range(warn_count):

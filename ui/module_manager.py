@@ -365,24 +365,29 @@ class ImgtransThread(QThread):
         self.page_start_offset = start_idx
         self.num_pages = len(pages_to_run)
 
-        low_vram_trans = self.translator.low_vram_mode
-        if self.translator is not None:
-            self.parallel_trans = not self.translator.is_computational_intensive() and not low_vram_trans
-        else:
-            self.parallel_trans = False
-        if self.parallel_trans and cfg_module.enable_translate:
-            self.translate_thread.runTranslatePipeline(self.imgtrans_proj)
+        low_vram_trans = self.translator.low_vram_mode if self.translator is not None else False
 
         self._stop_flag = False
         self._pause_event.set()
         if self.ocr is not None and hasattr(self.ocr, 'stop_flag'):
             self.ocr.stop_flag = False
 
-        for imgname in pages_to_run:
-            # ── 暫停：等到 resume ──────────────────────────────
-            self._pause_event.wait()
+        # ── 啟動背景 OCR Worker（非 low_vram）──
+        import queue as _queue
+        ocr_queue = _queue.Queue()
+        ocr_worker = None
+        need_bg_ocr = (cfg_module.enable_ocr or cfg_module.enable_translate) and not low_vram_trans
+        if need_bg_ocr:
+            ocr_worker = threading.Thread(
+                target=self._ocr_translate_worker,
+                args=(ocr_queue,),
+                daemon=True
+            )
+            ocr_worker.start()
 
-            # ── 停止 ───────────────────────────────────────────
+        # ── Phase 1：detect + inpaint（快速迴圈）──
+        for imgname in pages_to_run:
+            self._pause_event.wait()
             if self._stop_flag:
                 self.last_stopped_imgname = imgname
                 break
@@ -390,7 +395,7 @@ class ImgtransThread(QThread):
             img = self.imgtrans_proj.read_img(imgname)
             mask = blk_list = None
             need_save_mask = False
-            blk_removed: List[TextBlock] = []
+
             if cfg_module.enable_detect:
                 try:
                     if hasattr(self.textdetector, 'current_imgname'):
@@ -409,88 +414,118 @@ class ImgtransThread(QThread):
             if blk_list is None:
                 blk_list = self.imgtrans_proj.pages[imgname] if imgname in self.imgtrans_proj.pages else []
 
-            if cfg_module.enable_ocr:
-                try:
-                    self.ocr.current_imgname = imgname
-                    self.ocr.current_img_dir = self.imgtrans_proj.directory
-                    self.ocr.run_ocr(img, blk_list)
-                except Exception as e:
-                    create_error_dialog(e, self.tr('OCR Failed.'), 'OCRFailed')
-                self.ocr_counter += 1
-
-                if pcfg.restore_ocr_empty:
-                    blk_list_updated = []
-                    for blk in blk_list:
-                        text = blk.get_text()
-                        if text_is_empty(text):
-                            blk_removed.append(blk)
-                        else:
-                            blk_list_updated.append(blk)
-
-                    if len(blk_removed) > 0:
-                        blk_list.clear()
-                        blk_list += blk_list_updated
-                        
-                        if mask is None:
-                            mask = self.imgtrans_proj.load_mask_by_imgname(imgname)
-                        if mask is not None:
-                            inpainted = None
-                            if not cfg_module.enable_inpaint:
-                                inpainted = self.imgtrans_proj.load_inpainted_by_imgname(imgname)
-                            for blk in blk_removed:
-                                xywh = blk.bounding_rect()
-                                blk_mask, xyxy = get_block_mask(xywh, mask, blk.angle)
-                                x1, y1, x2, y2 = xyxy
-                                if blk_mask is not None:
-                                    mask[y1: y2, x1: x2] = 0
-                                    if inpainted is not None:
-                                        mskpnt = np.where(blk_mask)
-                                        inpainted[y1: y2, x1: x2][mskpnt] = img[y1: y2, x1: x2][mskpnt]
-                                    need_save_mask = True
-                            if inpainted is not None and need_save_mask:
-                                self.imgtrans_proj.save_inpainted(imgname, inpainted)
-                            if need_save_mask:
-                                self.imgtrans_proj.save_mask(imgname, mask)
-                                need_save_mask = False
-
-                self.update_ocr_progress.emit(self.ocr_counter)
-
-            if need_save_mask and mask is not None:
-                self.imgtrans_proj.save_mask(imgname, mask)
-                need_save_mask = False
-
-            if cfg_module.enable_translate:
-                if self.parallel_trans:
-                    self.translate_thread.push_pagekey_queue(imgname)
-                elif not low_vram_trans:
-                    self.translator.translate_textblk_lst(blk_list)
-                    self.translate_counter += 1
-                    self.update_translate_progress.emit(self.translate_counter)
-                        
             if cfg_module.enable_inpaint:
                 if mask is None:
                     mask = self.imgtrans_proj.load_mask_by_imgname(imgname)
-                    
                 if mask is not None:
                     try:
                         inpainted = self.inpainter.inpaint(img, mask, blk_list)
                         self.imgtrans_proj.save_inpainted(imgname, inpainted)
                     except Exception as e:
                         create_error_dialog(e, self.tr('Inpainting Failed.'), 'InpaintFailed')
-                    
                 self.inpaint_counter += 1
                 self.update_inpaint_progress.emit(self.inpaint_counter)
-            else:
-                if len(blk_removed) > 0:
-                    self.imgtrans_proj.load_mask_by_imgname
-        
-        if cfg_module.enable_translate and low_vram_trans:
-            unload_modules(self, ['textdetector', 'inpainter', 'ocr'])
-            for imgname in pages_to_run:
-                blk_list = self.imgtrans_proj.pages[imgname]
-                self.translator.translate_textblk_lst(blk_list)
+
+            if need_save_mask and mask is not None:
+                self.imgtrans_proj.save_mask(imgname, mask)
+
+            if need_bg_ocr:
+                ocr_queue.put(imgname)
+
+        # ── 等待背景 Worker 完成 ──
+        if ocr_worker is not None:
+            ocr_queue.put(None)  # sentinel
+            ocr_worker.join()
+
+        # ── Low VRAM 模式：Phase 1 完成後順序處理 OCR + 翻譯 ──
+        if low_vram_trans:
+            if cfg_module.enable_detect or cfg_module.enable_inpaint:
+                unload_modules(self, ['textdetector', 'inpainter'])
+            if cfg_module.enable_ocr:
+                for imgname in pages_to_run:
+                    if self._stop_flag:
+                        break
+                    self._do_ocr_page(imgname)
+            if cfg_module.enable_translate:
+                unload_modules(self, ['ocr'])
+                for imgname in pages_to_run:
+                    if self._stop_flag:
+                        break
+                    blk_list = self.imgtrans_proj.pages.get(imgname, [])
+                    try:
+                        self.translator.translate_textblk_lst(blk_list)
+                    except Exception as e:
+                        create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+                    self.translate_counter += 1
+                    self.update_translate_progress.emit(self.translate_counter)
+
+    def _ocr_translate_worker(self, ocr_queue):
+        """背景執行緒：逐頁 OCR + 翻譯，不阻塞 Phase 1 的 detect/inpaint。"""
+        import queue as _queue
+        while True:
+            try:
+                imgname = ocr_queue.get(timeout=0.5)
+            except _queue.Empty:
+                if self._stop_flag:
+                    break
+                continue
+
+            if imgname is None:  # sentinel
+                break
+            if self._stop_flag:
+                break
+
+            self._do_ocr_page(imgname)
+
+            if cfg_module.enable_translate and not self._stop_flag:
+                blk_list = self.imgtrans_proj.pages.get(imgname, [])
+                try:
+                    self.translator.translate_textblk_lst(blk_list)
+                except Exception as e:
+                    create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
                 self.translate_counter += 1
                 self.update_translate_progress.emit(self.translate_counter)
+
+    def _do_ocr_page(self, imgname):
+        """單頁 OCR + restore_ocr_empty 處理。"""
+        if not cfg_module.enable_ocr:
+            return
+
+        img = self.imgtrans_proj.read_img(imgname)
+        blk_list = self.imgtrans_proj.pages.get(imgname, [])
+
+        try:
+            self.ocr.current_imgname = imgname
+            self.ocr.current_img_dir = self.imgtrans_proj.directory
+            self.ocr.run_ocr(img, blk_list)
+        except Exception as e:
+            create_error_dialog(e, self.tr('OCR Failed.'), 'OCRFailed')
+
+        if pcfg.restore_ocr_empty:
+            blk_removed = [b for b in blk_list if text_is_empty(b.get_text())]
+            if blk_removed:
+                blk_list[:] = [b for b in blk_list if not text_is_empty(b.get_text())]
+                mask = self.imgtrans_proj.load_mask_by_imgname(imgname)
+                inpainted = self.imgtrans_proj.load_inpainted_by_imgname(imgname)
+                if mask is not None:
+                    need_save = False
+                    for blk in blk_removed:
+                        xywh = blk.bounding_rect()
+                        blk_mask, xyxy = get_block_mask(xywh, mask, blk.angle)
+                        x1, y1, x2, y2 = xyxy
+                        if blk_mask is not None:
+                            mask[y1:y2, x1:x2] = 0
+                            if inpainted is not None:
+                                mskpnt = np.where(blk_mask)
+                                inpainted[y1:y2, x1:x2][mskpnt] = img[y1:y2, x1:x2][mskpnt]
+                            need_save = True
+                    if need_save:
+                        self.imgtrans_proj.save_mask(imgname, mask)
+                        if inpainted is not None:
+                            self.imgtrans_proj.save_inpainted(imgname, inpainted)
+
+        self.ocr_counter += 1
+        self.update_ocr_progress.emit(self.ocr_counter)
 
     def detect_finished(self) -> bool:
         if self.imgtrans_proj is None:
