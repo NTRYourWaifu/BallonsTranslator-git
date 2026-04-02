@@ -96,6 +96,14 @@ def _draw_square(p: QPainter, cx: float, cy: float, r: float, color: QColor):
     p.drawRect(QRectF(cx - half, cy - half, half * 2, half * 2))
 
 
+def _draw_rect(p: QPainter, cx: float, cy: float, r: float, color: QColor):
+    """▭ 空心直立長方形（對話框凸出圖片範圍）"""
+    pen = QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(QRectF(cx - r * 0.45, cy - r * 0.75, r * 0.9, r * 1.5))
+
+
 # ── Plan 設定 ────────────────────────────────────────────────
 # (event_key, draw_func, 顏色, tooltip)
 _PLAN_CONFIG = [
@@ -105,6 +113,7 @@ _PLAN_CONFIG = [
     ('grok_ok',    _draw_diamond,  '#e91e96', 'Plan D（Grok）成功'),
     ('error',      _draw_cross,    '#f44336', '異常 / 放棄'),
     ('det_warn',   _draw_square,   '#ffc107', '偵測方向異常'),
+    ('box_oob',    _draw_rect,     '#f44336', '對話框凸出圖片範圍'),
 ]
 
 

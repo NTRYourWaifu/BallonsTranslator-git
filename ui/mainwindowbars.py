@@ -69,6 +69,14 @@ _SVG_APPLY_FONT = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
   <polyline points="14,15 17,19 22,11" stroke="#88cc88" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>'''
 
+_SVG_EXPORT_ALL = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <rect x="3" y="3" width="12" height="9" rx="1.2" fill="none" stroke="#cccccc" stroke-width="1.6"/>
+  <rect x="5" y="6" width="12" height="9" rx="1.2" fill="none" stroke="#cccccc" stroke-width="1.6"/>
+  <rect x="7" y="9" width="12" height="9" rx="1.2" fill="#333" stroke="#cccccc" stroke-width="1.6"/>
+  <polyline points="10,17 13,20 16,17" stroke="#88cc88" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="13" y1="13" x2="13" y2="20" stroke="#88cc88" stroke-width="2" stroke-linecap="round"/>
+</svg>'''
+
 
 if C.FLAG_QT6:
     from qtpy.QtGui import QAction
@@ -178,6 +186,7 @@ class LeftBar(Widget):
     open_json_proj = Signal(str)
     save_proj = Signal()
     save_config = Signal()
+    export_all_pages = Signal()
     def __init__(self, mainwindow, *args, **kwargs) -> None:
         super().__init__(mainwindow, *args, **kwargs)
         self.mainwindow: QMainWindow = mainwindow
@@ -284,6 +293,13 @@ class LeftBar(Widget):
         self.applyFontScaleBtn.setIconSize(self.applyFontScaleBtn.size())
         self.applyFontScaleBtn.setToolTip(self.tr('套用字型係數（當前頁）'))
 
+        self.exportAllBtn = QPushButton()
+        self.exportAllBtn.setFixedSize(btn_size, btn_size)
+        self.exportAllBtn.setIcon(_svg_icon(_SVG_EXPORT_ALL, btn_size))
+        self.exportAllBtn.setIconSize(self.exportAllBtn.size())
+        self.exportAllBtn.setToolTip(self.tr('輸出全部結果圖片'))
+        self.exportAllBtn.clicked.connect(self.export_all_pages)
+
         vlayout = QVBoxLayout(self)
         vlayout.addWidget(openBtnToolBar)
         vlayout.addWidget(self.showPageListLabel)
@@ -295,6 +311,7 @@ class LeftBar(Widget):
         vlayout.addWidget(self.resumeHereBtn)
         vlayout.addWidget(self.measureFontBtn)
         vlayout.addWidget(self.applyFontScaleBtn)
+        vlayout.addWidget(self.exportAllBtn)
         vlayout.addWidget(self.configChecker)
         vlayout.addWidget(self.runImgtransBtn)
         vlayout.setContentsMargins(padding, 0, padding, int(LEFTBTN_WIDTH / 2))

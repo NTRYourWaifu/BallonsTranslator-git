@@ -25,6 +25,7 @@ class OcrEventType:
     GROK_OK    = 'grok_ok'     # 粉  Grok 成功（切片或全頁）
     ERROR      = 'error'       # 紅  最終放棄此頁
     DET_WARN   = 'det_warn'    # 黃方 偵測方向異常（CTD/YOLO 方向矛盾）
+    BOX_OOB    = 'box_oob'    # 紅矩 對話框凸出圖片範圍
 
 
 class OcrStatsSignals(QObject):
@@ -267,8 +268,8 @@ class OCRLlm(OCRBase):
     def disable_plan_b(self) -> bool:   return bool(self.params['disable_plan_b']['value'])
 
     # ── 統計事件 ──────────────────────────────────────────────
-    def _emit(self, event_type: str):
-        self.stats_signals.event.emit(event_type, self.current_imgname)
+    def _emit(self, event_type: str, imgname: str = ''):
+        self.stats_signals.event.emit(event_type, imgname or self.current_imgname)
 
     # ── 客戶端 ────────────────────────────────────────────────
     def _api_key_for(self, model: str) -> str:
@@ -378,6 +379,7 @@ class OCRLlm(OCRBase):
                 if _retry_printed: print()
                 return 'ERR:已停止'
             self._respect_delay()
+            _t0 = time.monotonic()
             try:
                 if isinstance(_client, OpenAICompatClient):
                     result = _client.ocr(img_b64, target_prompt, timeout=120, allow_array=allow_array)
@@ -386,9 +388,10 @@ class OCRLlm(OCRBase):
                 if _retry_printed: print()  # 補換行讓後續 log 不亂
                 return result
             except Exception as e:
+                _elapsed = time.monotonic() - _t0
                 err = str(e)
                 if '503' in err or 'unavailable' in err.lower() or '500' in err or 'internal server' in err.lower():
-                    overload_elapsed += 5.0
+                    overload_elapsed += _elapsed + 5.0
                     overload_attempt += 1
                     if overload_elapsed > max_overload_seconds:
                         print()  # 結束覆寫行
@@ -397,11 +400,11 @@ class OCRLlm(OCRBase):
                     if overload_attempt == 1:
                         self.logger.error(f"API服務不可用 ({err[:120]})，開始重試（上限 {max_overload_seconds}s）...")
                     _retry_printed = True
-                    print(f"\r[WARNING] API服務不可用，5s 後重試 ({overload_attempt}/{max_attempts_display})...   ", end='', flush=True)
+                    print(f"\r[WARNING] API服務不可用，5s 後重試 ({overload_attempt}/{max_attempts_display} 已等 {overload_elapsed:.0f}s/{max_overload_seconds}s)...   ", end='', flush=True)
                     time.sleep(5.0)
                 elif '429' in err or 'exhausted' in err.lower() or 'quota' in err.lower():
                     wait = _STEP_WAITS[min(ratelimit_attempt, len(_STEP_WAITS) - 1)]
-                    ratelimit_elapsed += wait
+                    ratelimit_elapsed += _elapsed + wait
                     ratelimit_attempt += 1
                     if ratelimit_elapsed > 120:
                         print()
@@ -411,7 +414,7 @@ class OCRLlm(OCRBase):
                     time.sleep(wait)
                 elif 'timeout' in err.lower() or 'timed out' in err.lower():
                     wait = _STEP_WAITS[min(timeout_attempt, len(_STEP_WAITS) - 1)]
-                    timeout_elapsed += wait
+                    timeout_elapsed += _elapsed + wait
                     timeout_attempt += 1
                     if timeout_elapsed > max_timeout_seconds:
                         print()
@@ -684,7 +687,8 @@ class OCRLlm(OCRBase):
                              cropped: np.ndarray, log_prefix: str,
                              max_overload_seconds: int = 120,
                              max_timeout_seconds: int = 120,
-                             client=None, is_fallback: bool = False):
+                             client=None, is_fallback: bool = False,
+                             imgname: str = ''):
         used_grok = False
         resp = self._call_ocr(cropped, custom_prompt=self._SLICE_PROMPT,
                               max_overload_seconds=max_overload_seconds,
@@ -694,24 +698,24 @@ class OCRLlm(OCRBase):
         if resp == 'BLOCKED_BY_SAFETY':
             if is_fallback:
                 # Plan C 本身已是 fallback，不遞迴呼叫
-                self._emit(OcrEventType.ERROR)
+                self._emit(OcrEventType.ERROR, imgname)
                 return idx, None
             resp = self._call_ocr_grok(cropped, self._SLICE_PROMPT, log_prefix,
                                        silent=True)
             if not resp or resp.isdigit():
                 self.logger.error(f"{log_prefix} 切片 {idx+1} 失敗: {resp or '?'}")
-                self._emit(OcrEventType.ERROR)
+                self._emit(OcrEventType.ERROR, imgname)
                 return idx, None
             used_grok = True
 
         if not resp:
-            self._emit(OcrEventType.ERROR)
+            self._emit(OcrEventType.ERROR, imgname)
             return idx, None
 
         try:
             clean = re.sub(r'```json\s*|\s*```', '', resp).strip()
             if not clean or clean in ('{}', '[]'):
-                self._emit(OcrEventType.ERROR)
+                self._emit(OcrEventType.ERROR, imgname)
                 return idx, None
             data = json.loads(clean)
             if isinstance(data, list):
@@ -727,19 +731,21 @@ class OCRLlm(OCRBase):
                     blk.obs.ocr_says_vertical = False
                 blk.obs.ocr_is_handwritten = bool(data.get('is_handwritten', False))
                 blk.obs.ocr_font_size_px = float(data.get('font_size_px', -1))
-                self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK)
+                self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK, imgname)
                 return idx, blk
         except Exception as e:
             self.logger.warning(f"{log_prefix} 切片 {idx+1} 解析失敗: {e}")
 
-        self._emit(OcrEventType.ERROR)
+        self._emit(OcrEventType.ERROR, imgname)
         return idx, None
 
     def _run_slice_plan(self, img: np.ndarray, blk_list: List[TextBlock],
                          log_prefix: str, probe_retry_seconds: int = 300,
-                         client=None, ignore_disable: bool = False):
+                         client=None, ignore_disable: bool = False,
+                         imgname: str = ''):
         if self.disable_plan_b and not ignore_disable:
             return 'SKIP:disabled', 0, len(blk_list), list(range(len(blk_list)))
+        snap_imgname = imgname or self.current_imgname
         h, w = img.shape[:2]
         pad = 12
         tasks = []
@@ -762,6 +768,7 @@ class OCRLlm(OCRBase):
             max_overload_seconds=probe_retry_seconds,
             max_timeout_seconds=probe_retry_seconds,
             client=client, is_fallback=(client is not None),
+            imgname=snap_imgname,
         )
         if p_blk is None:
             self.logger.warning(f"{log_prefix} Plan B 試探框失敗（超過 {probe_retry_seconds}s），跳 Plan C")
@@ -775,7 +782,7 @@ class OCRLlm(OCRBase):
             futs = {}
             for i, (orig_idx, blk, crop) in enumerate(remaining_tasks):
                 futs[ex.submit(self._process_single_blk, orig_idx, blk, crop, log_prefix,
-                               120, 120, client, client is not None)] = orig_idx
+                               120, 120, client, client is not None, snap_imgname)] = orig_idx
                 # 在分配任務時加入固定延遲，完美錯開併發流量
                 if i < len(remaining_tasks) - 1:
                     time.sleep(0.3)
@@ -864,12 +871,14 @@ class OCRLlm(OCRBase):
 
     # ── 主流程 ────────────────────────────────────────────────
     def _ocr_blk_list(self, img: np.ndarray, blk_list: List[TextBlock],
-                       *args, force_slice=False, **kwargs):
+                       *args, force_slice=False, imgname: str = '', **kwargs):
         if self.client is None or not blk_list:
             return
 
         self.page_counter += 1
-        lp = f"[{self._fmt_imgname(self.current_imgname)}]"
+        # 優先用呼叫方傳入的 imgname，避免多 worker 共用 self.current_imgname 被覆蓋
+        snap_imgname = imgname or self.current_imgname
+        lp = f"[{self._fmt_imgname(snap_imgname)}]"
 
         sorted_blks = self._sort_blk_reading_order(blk_list)
 
@@ -877,7 +886,7 @@ class OCRLlm(OCRBase):
         if not force_slice:
             result, matched = self._run_fullpage(img, sorted_blks)
             if result == 'ok':
-                self._emit(OcrEventType.PLAN_A_OK)
+                self._emit(OcrEventType.PLAN_A_OK, snap_imgname)
                 self.logger.success(f"{lp} Plan A 成功（{matched}/{len(blk_list)} 框）")
                 for blk in blk_list:
                     resolve_blk_style(blk)
@@ -887,7 +896,8 @@ class OCRLlm(OCRBase):
         # Plan B：切片（含切片層級的 Grok 備援）
         result, ok, fail, failed_indices = self._run_slice_plan(
             img, blk_list, lp,
-            probe_retry_seconds=self.plan_b_retry_seconds
+            probe_retry_seconds=self.plan_b_retry_seconds,
+            imgname=snap_imgname,
         )
         if result == 'PROBE_FAIL':
             self.logger.warning(f"{lp} Plan B 試探框失敗（上限 {self.plan_b_retry_seconds}s），跳 Plan C")
@@ -913,7 +923,7 @@ class OCRLlm(OCRBase):
             for blk in blk_list:
                 resolve_blk_style(blk)
             self.logger.error(f"{lp} 無備援API，此頁放棄")
-            self._emit(OcrEventType.ERROR)
+            self._emit(OcrEventType.ERROR, snap_imgname)
             return
 
         all_failed = (result == 'PROBE_FAIL') or (result != 'ok')
@@ -923,7 +933,7 @@ class OCRLlm(OCRBase):
             self.logger.info(f"{lp} Plan C 全頁模式（fallback model）...")
             result_c, matched_c = self._run_fullpage_impl(img, sorted_blks, client=fallback_client)
             if result_c == 'ok':
-                self._emit(OcrEventType.GROK_OK)
+                self._emit(OcrEventType.GROK_OK, snap_imgname)
                 self.logger.success(f"{lp} Plan C 全頁成功（{matched_c}/{len(blk_list)} 框）")
                 for blk in blk_list:
                     resolve_blk_style(blk)
@@ -939,6 +949,7 @@ class OCRLlm(OCRBase):
             probe_retry_seconds=self.plan_c_retry_seconds,
             client=fallback_client,
             ignore_disable=True,
+            imgname=snap_imgname,
         )
         # local_failed 是子集內的 index，映射回原始 blk_list index
         still_failed = [failed_indices[li] for li in local_failed]

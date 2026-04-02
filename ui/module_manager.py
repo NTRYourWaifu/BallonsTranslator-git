@@ -265,6 +265,7 @@ class ImgtransThread(QThread):
     finish_blktrans = Signal(int, list)
     unload_modules = Signal(list)
     page_ocr_trans_done = Signal(str)   # imgname，OCR（+翻譯）真正完成後 emit
+    page_inpaint_done = Signal(str, object, object)  # (imgname, mask, inpainted)，inpaint 完成後 emit
 
     detect_counter = 0
     ocr_counter = 0
@@ -403,7 +404,7 @@ class ImgtransThread(QThread):
                 break
 
             img = self.imgtrans_proj.read_img(imgname)
-            mask = blk_list = None
+            mask = blk_list = inpainted = None
             need_save_mask = False
 
             if cfg_module.enable_detect:
@@ -413,7 +414,8 @@ class ImgtransThread(QThread):
                     mask, blk_list = self.textdetector.detect(img)
                     if self.mask_postprocess is not None:
                         mask = self.mask_postprocess(mask)
-                    need_save_mask = True
+                    if mask is not None and mask.sum() > 0:
+                        need_save_mask = True
                 except Exception as e:
                     create_error_dialog(e, self.tr('Text Detection Failed.'), 'TextDetectFailed')
                     blk_list = []
@@ -429,7 +431,7 @@ class ImgtransThread(QThread):
                     mask = self.imgtrans_proj.load_mask_by_imgname(imgname)
                 if mask is not None:
                     try:
-                        inpainted = self.inpainter.inpaint(img, mask, blk_list)
+                        inpainted = self.inpainter.inpaint(img, mask.copy(), blk_list)
                         self.imgtrans_proj.save_inpainted(imgname, inpainted)
                     except Exception as e:
                         create_error_dialog(e, self.tr('Inpainting Failed.'), 'InpaintFailed')
@@ -438,6 +440,7 @@ class ImgtransThread(QThread):
 
             if need_save_mask and mask is not None:
                 self.imgtrans_proj.save_mask(imgname, mask)
+                self.page_inpaint_done.emit(imgname, mask, inpainted)
 
             if need_bg_ocr:
                 ocr_queue.put(imgname)
@@ -517,7 +520,7 @@ class ImgtransThread(QThread):
         try:
             self.ocr.current_imgname = imgname
             self.ocr.current_img_dir = self.imgtrans_proj.directory
-            self.ocr.run_ocr(img, blk_list)
+            self.ocr.run_ocr(img, blk_list, imgname=imgname)
         except Exception as e:
             create_error_dialog(e, self.tr('OCR Failed.'), 'OCRFailed')
 

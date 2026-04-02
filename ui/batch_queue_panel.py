@@ -57,11 +57,12 @@ _OCR_PLANS = [
     ('grok_ok',    '#e91e96'),
     ('error',      '#f44336'),
     ('det_warn',   '#ffc107'),
+    ('box_oob',    '#f44336'),
 ]
 
 _OCR_TOOLTIPS = [
     'Plan A 原圖成功', '⚠️ 字型異常警告', 'Plan B 切片成功',
-    'Plan C Grok 備援', '異常 / 放棄', '偵測方向異常',
+    'Plan C Grok 備援', '異常 / 放棄', '偵測方向異常', '對話框凸出圖片範圍',
 ]
 
 
@@ -108,12 +109,17 @@ def _draw_square(p, cx, cy, r, color):
     half = r * 0.65
     p.drawRect(QRectF(cx - half, cy - half, half * 2, half * 2))
 
-_OCR_DRAW = [_draw_check, _draw_triangle, _draw_scissors, _draw_diamond, _draw_cross, _draw_square]
+def _draw_rect(p, cx, cy, r, color):
+    pen = QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(QRectF(cx - r * 0.45, cy - r * 0.75, r * 0.9, r * 1.5))
+
+_OCR_DRAW = [_draw_check, _draw_triangle, _draw_scissors, _draw_diamond, _draw_cross, _draw_square, _draw_rect]
 
 
 # ── Delegate ──────────────────────────────────────────────────
 ROW_COLLAPSED = 42
-ROW_EXPANDED  = 80
+ROW_EXPANDED  = 100
 DOT_LEFT = 12
 DOT_R    = 6
 DOT_HIT  = DOT_LEFT + DOT_R + 6   # 點擊判定區
@@ -173,21 +179,25 @@ class _FolderItemDelegate(QStyledItemDelegate):
                          Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, status_text)
 
         if expanded:
-            icon_y = rect.top() + 44
+            icon_y = rect.top() + 36
             icon_r = 5.0
-            gap = 52
+            gap = 44
             base_x = text_x
             num_font = QFont(option.font)
             num_font.setPointSizeF(9)
 
+            row2_y = rect.top() + 62
             for i, (key, color_hex) in enumerate(_OCR_PLANS):
-                ix = base_x + i * gap
+                row = i // 4
+                col = i % 4
+                ix = base_x + col * gap
+                iy = icon_y if row == 0 else row2_y
                 color = QColor(color_hex)
                 count = stats.get(key, 0)
-                _OCR_DRAW[i](painter, ix, icon_y, icon_r, color)
+                _OCR_DRAW[i](painter, ix, iy, icon_r, color)
                 painter.setFont(num_font)
                 painter.setPen(QColor('#999') if count == 0 else color)
-                painter.drawText(int(ix + icon_r + 3), int(icon_y - 8), 24, 16,
+                painter.drawText(int(ix + icon_r + 3), int(iy - 8), 24, 16,
                                  Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                                  str(count))
 
@@ -195,7 +205,7 @@ class _FolderItemDelegate(QStyledItemDelegate):
             path_font.setPointSizeF(8)
             painter.setFont(path_font)
             painter.setPen(QColor('#666'))
-            painter.drawText(text_x, rect.top() + 58, rect.width() - text_x - 8, 16,
+            painter.drawText(text_x, rect.top() + 80, rect.width() - text_x - 8, 16,
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, path)
 
         painter.restore()
