@@ -29,12 +29,14 @@ class _Status:
     PENDING  = 'pending'
     RUNNING  = 'running'
     DONE     = 'done'
+    WARN     = 'warn'
     ERROR    = 'error'
 
 _STATUS_COLORS = {
     _Status.PENDING:  QColor('#555555'),
     _Status.RUNNING:  QColor('#ffc107'),
     _Status.DONE:     QColor('#4caf50'),
+    _Status.WARN:     QColor('#e91e96'),
     _Status.ERROR:    QColor('#f44336'),
 }
 
@@ -42,6 +44,7 @@ _STATUS_LABEL = {
     _Status.PENDING:  '等待中',
     _Status.RUNNING:  '執行中',
     _Status.DONE:     '完成',
+    _Status.WARN:     'Grok備援',
     _Status.ERROR:    '異常',
 }
 
@@ -61,8 +64,8 @@ _OCR_PLANS = [
 ]
 
 _OCR_TOOLTIPS = [
-    'Plan A 原圖成功', '⚠️ 字型異常警告', 'Plan B 切片成功',
-    'Plan C Grok 備援', '異常 / 放棄', '偵測方向異常', '對話框凸出圖片範圍',
+    'Plan A 原圖成功', '⚠️ 字型嚴重過小', 'Plan B 切片成功',
+    'Plan C Grok 備援', '異常 / 放棄', '⚠️ 字型疑似過小', '對話框凸出圖片範圍',
 ]
 
 
@@ -351,6 +354,7 @@ class BatchQueuePanel(Widget):
     run_batch = Signal(list)
     queue_changed = Signal(int)
     open_folder = Signal(str)    # 點擊項目時切換到該資料夾
+    folder_added = Signal(str)   # 新資料夾加入佇列（供 mainwindow 回填歷史統計）
 
     MIN_WIDTH = 300
 
@@ -462,6 +466,7 @@ class BatchQueuePanel(Widget):
                 self.folderList.addItem(item)
                 existing.add(d)
                 added += 1
+                self.folder_added.emit(d)
         if added:
             self.hintLabel.setVisible(False)
             self._updateCount()
@@ -471,6 +476,9 @@ class BatchQueuePanel(Widget):
 
     def markDone(self, folder):
         self._setStatus(folder, _Status.DONE)
+
+    def markWarn(self, folder):
+        self._setStatus(folder, _Status.WARN)
 
     def markError(self, folder):
         self._setStatus(folder, _Status.ERROR)
@@ -494,6 +502,17 @@ class BatchQueuePanel(Widget):
             if osp.normpath(item.data(ROLE_PATH)) == folder:
                 return item.data(ROLE_OCR_STATS) or {}
         return {}
+
+    def setFolderHistory(self, folder: str, stats: dict, status: str):
+        """回填歷史 OCR 統計與狀態（拖入時由 mainwindow 從 JSON 讀取後呼叫）"""
+        folder = osp.normpath(folder)
+        for i in range(self.folderList.count()):
+            item = self.folderList.item(i)
+            if osp.normpath(item.data(ROLE_PATH)) == folder:
+                item.setData(ROLE_OCR_STATS, stats)
+                item.setData(ROLE_STATUS, status)
+                break
+        self.folderList.viewport().update()
 
     def setRunning(self, running: bool):
         self.addBtn.setEnabled(not running)

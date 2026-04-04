@@ -108,11 +108,11 @@ def _draw_rect(p: QPainter, cx: float, cy: float, r: float, color: QColor):
 # (event_key, draw_func, 顏色, tooltip)
 _PLAN_CONFIG = [
     ('plan_a_ok',  _draw_check,    '#4caf50', 'Plan A（原圖）成功'),
-    ('plan_a2_ok', _draw_triangle, '#ffc107', 'Plan B（黑圖）成功'),
+    ('plan_a2_ok', _draw_triangle, '#ffc107', '⚠️ 字型嚴重過小'),
     ('slice_ok',   _draw_scissors, '#ff9800', 'Plan C（切片）成功'),
     ('grok_ok',    _draw_diamond,  '#e91e96', 'Plan D（Grok）成功'),
     ('error',      _draw_cross,    '#f44336', '異常 / 放棄'),
-    ('det_warn',   _draw_square,   '#ffc107', '偵測方向異常'),
+    ('det_warn',   _draw_square,   '#ffc107', '⚠️ 字型疑似過小'),
     ('box_oob',    _draw_rect,     '#f44336', '對話框凸出圖片範圍'),
 ]
 

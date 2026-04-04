@@ -7,7 +7,7 @@ from functools import partial
 import time
 
 from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit, QStyledItemDelegate
-from qtpy.QtCore import Qt, QPoint, QPointF, QSize, QEvent, Signal
+from qtpy.QtCore import Qt, QPoint, QPointF, QSize, QEvent, Signal, QTimer
 from qtpy.QtGui import QContextMenuEvent, QTextCursor, QGuiApplication, QIcon, QCloseEvent, QKeySequence, QKeyEvent, QPainter, QClipboard, QBrush, QColor
 
 from utils.logger import logger as LOGGER
@@ -29,7 +29,7 @@ from .mainwindowbars import TitleBar, LeftBar, BottomBar
 from .io_thread import ImgSaveThread, ImportDocThread, ExportDocThread
 from .custom_widget import Widget, ViewWidget
 from .global_search_widget import GlobalSearchWidget
-from .batch_queue_panel import BatchQueuePanel, _OCR_PLANS, _OCR_DRAW
+from .batch_queue_panel import BatchQueuePanel, _OCR_PLANS, _OCR_DRAW, _Status as _BatchStatus
 from .textedit_commands import GlobalRepalceAllCommand
 from .framelesswindow import FramelessWindow
 from .drawing_commands import RunBlkTransCommand
@@ -154,6 +154,8 @@ class MainWindow(mainwindow_cls):
         self._gui_batch_current = None
         self._gui_batch_running = False
         self._page_ocr_cache: dict = {}   # {folder_path: {imgname: {event_type: count}}}
+        self._ocr_done_queue: list = []   # 待處理的 on_page_ocr_trans_done imgname 佇列
+        self._ocr_done_processing = False  # 是否正在處理中
 
         self.setupThread()
         self.setupUi()
@@ -234,6 +236,7 @@ class MainWindow(mainwindow_cls):
         self.batchQueuePanel = BatchQueuePanel(self.leftStackWidget)
         self.batchQueuePanel.run_batch.connect(self.on_run_batch_gui)
         self.batchQueuePanel.open_folder.connect(self.openDir)
+        self.batchQueuePanel.folder_added.connect(self._on_batch_folder_added)
         self.leftStackWidget.addWidget(self.batchQueuePanel)
         self.leftBar.batchQueueChecker.clicked.connect(self.on_set_batch_queue_widget)
         
@@ -947,6 +950,8 @@ class MainWindow(mainwindow_cls):
                     inpainted = self.imgtrans_proj.inpainted_array
                 self.imsave_thread.saveImg(inpainted_path, inpainted)
 
+        for _b in self.st_manager.textblk_item_list:
+            _b.repaint_background()
         img = self.canvas.render_result_img()
         imsave_path = self.imgtrans_proj.get_result_path(self.imgtrans_proj.current_img)
         self.imsave_thread.saveImg(imsave_path, img, self.imgtrans_proj.current_img, save_params={'ext': pcfg.imgsave_ext, 'quality': pcfg.imgsave_quality})
@@ -1092,13 +1097,18 @@ class MainWindow(mainwindow_cls):
         if shared.HEADLESS:
             self.run_next_dir()
         elif self._gui_batch_running:
-            # GUI 批量模式：根據 OCR 統計判定完成 or 異常
-            # 出現 Grok 備援（粉◆）或 OCR 失敗（紅✕）→ 異常
+            # GUI 批量模式：根據 OCR 統計判定完成 / 備援 / 異常
+            # 紅燈：OCR 失敗（紅✕）或對話框超出範圍（紅矩）
+            # 粉燈：Grok 備援（粉◆）但無紅燈事件
+            # 綠燈：以上皆無
             if self._gui_batch_current:
                 stats = self.batchQueuePanel.getOcrStats(self._gui_batch_current)
-                has_anomaly = stats.get('grok_ok', 0) > 0 or stats.get('error', 0) > 0
-                if has_anomaly:
+                has_error = stats.get('error', 0) > 0 or stats.get('box_oob', 0) > 0
+                has_warn  = stats.get('grok_ok', 0) > 0
+                if has_error:
                     self.batchQueuePanel.markError(self._gui_batch_current)
+                elif has_warn:
+                    self.batchQueuePanel.markWarn(self._gui_batch_current)
                 else:
                     self.batchQueuePanel.markDone(self._gui_batch_current)
             self._run_next_gui_batch()
@@ -1231,6 +1241,22 @@ class MainWindow(mainwindow_cls):
         """OCR（+翻譯）真正完成後才呼叫，用 imgname 確保是正確頁面。"""
         if self.imgtrans_proj is None or imgname not in self.imgtrans_proj.pages:
             return
+        self._ocr_done_queue.append(imgname)
+        if not self._ocr_done_processing:
+            self._process_next_ocr_done()
+
+    def _process_next_ocr_done(self):
+        if not self._ocr_done_queue:
+            self._ocr_done_processing = False
+            return
+        self._ocr_done_processing = True
+        imgname = self._ocr_done_queue.pop(0)
+        self._do_page_ocr_trans_done(imgname)
+        self._process_next_ocr_done()
+
+    def _do_page_ocr_trans_done(self, imgname: str):
+        if self.imgtrans_proj is None or imgname not in self.imgtrans_proj.pages:
+            return
         blk_list = self.imgtrans_proj.pages[imgname]
         if not blk_list:
             return
@@ -1238,6 +1264,20 @@ class MainWindow(mainwindow_cls):
         override_fnt_size = pcfg.let_fntsize_flag == 1
         if override_fnt_size:
             return  # 使用者強制覆蓋字型大小，不需要 render 計算
+
+        # 補做 stroke_width / stroke_color 設定（on_pagtrans_finished 可能還沒跑）
+        override_fnt_stroke = pcfg.let_fntstroke_flag == 1
+        override_fnt_scolor = pcfg.let_fnt_scolor_flag == 1
+        gf = self.textPanel.formatpanel.global_format
+        for blk in blk_list:
+            if override_fnt_stroke:
+                blk.stroke_width = gf.stroke_width
+            elif blk.fontformat.stroke_width == 0:
+                blk.recalulate_stroke_width()
+            if override_fnt_scolor:
+                blk.set_font_colors(bg_colors=gf.srgb)
+            elif blk.fontformat.srgb == [0, 0, 0]:
+                blk.set_font_colors(bg_colors=gf.srgb)
 
         _batch_current = self._gui_batch_current if self._gui_batch_running else None
 
@@ -1259,7 +1299,6 @@ class MainWindow(mainwindow_cls):
                 blk.font_size = calc_font_size_by_render(blk, scale=_scale,
                                                           img_h=_img_h,
                                                           char_scale_table=_char_scale_table)
-
 
         # 字體過小警告（基於最終渲染結果）
         from modules.ocr.ocr_llm import OcrEventType
@@ -1299,12 +1338,10 @@ class MainWindow(mainwindow_cls):
                 reason.append(f"[條件二:佔比={ratio_val:.3f}]")
 
             if cond1 and cond2:
-                # 兩個條件都滿足 → 觸發 FONT_WARN（圖標 + log）
                 if _ocr_ref is not None:
                     _ocr_ref.logger.warning(f"[{imgname}] 字型過小(雙條件) {' '.join(reason)} 譯文：{blk.translation!r}")
                 warn_count += 1
             elif cond1 or cond2:
-                # 只有一個條件 → 方形圖標（det_warn）
                 if _ocr_ref is not None:
                     _ocr_ref.logger.warning(f"[{imgname}] 字型疑似過小(單條���) {' '.join(reason)} 譯文：{blk.translation!r}")
                 det_warn_count += 1
@@ -1334,12 +1371,12 @@ class MainWindow(mainwindow_cls):
         page_index = self.imgtrans_proj.pagename2idx(imgname)
         if page_index < 0:
             return
-        if page_index == self.pageList.currentIndex().row():
-            self.imgtrans_proj.set_current_img_byidx(page_index)
-            self.canvas.updateCanvas()
-            self.st_manager.updateSceneTextitems()
-        else:
-            self.pageList.setCurrentRow(page_index)
+        self.imgtrans_proj.set_current_img_byidx(page_index)
+        self.canvas.updateCanvas()
+        self.st_manager.updateSceneTextitems()
+        self.pageList.blockSignals(True)
+        self.pageList.setCurrentRow(page_index)
+        self.pageList.blockSignals(False)
         self.saveCurrentPage(False, False)
 
     def on_savestate_changed(self, unsaved: bool):
@@ -1621,6 +1658,37 @@ class MainWindow(mainwindow_cls):
         LOGGER.info(f'批量翻譯：{d} （剩餘 {len(self._gui_batch_dirs)} 個）')
         self.openDir(d)
         self._prepare_imgtrans_run(reset_stats=False)
+
+    def _on_batch_folder_added(self, folder: str):
+        """新資料夾加入批量佇列時，從該資料夾的 JSON 讀取歷史 OCR 統計並回填面板"""
+        proj_name = 'imgtrans_' + osp.basename(folder) + '.json'
+        proj_path = osp.join(folder, proj_name)
+        if not osp.exists(proj_path):
+            return
+        try:
+            import json as _json
+            with open(proj_path, 'r', encoding='utf-8') as f:
+                proj_dict = _json.loads(f.read())
+        except Exception:
+            return
+        page_ocr_stats = proj_dict.get('page_ocr_stats', {})
+        if not page_ocr_stats:
+            return
+        # 加總所有頁面的統計
+        totals = {}
+        for img_stats in page_ocr_stats.values():
+            for k, v in img_stats.items():
+                totals[k] = totals.get(k, 0) + v
+        # 依統計推斷上次的狀態
+        has_error = totals.get('error', 0) > 0 or totals.get('box_oob', 0) > 0
+        has_warn  = totals.get('grok_ok', 0) > 0
+        if has_error:
+            status = _BatchStatus.ERROR
+        elif has_warn:
+            status = _BatchStatus.WARN
+        else:
+            status = _BatchStatus.DONE
+        self.batchQueuePanel.setFolderHistory(folder, totals, status)
 
     def _on_batch_ocr_event(self, event_type: str, imgname: str = '', count: int = 1, _batch_override: str = None):
         """轉發 OCR 事件到佇列面板的當前資料夾，並更新頁面列表圖標與底部統計欄

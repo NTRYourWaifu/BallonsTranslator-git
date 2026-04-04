@@ -20,11 +20,11 @@ from utils.textblock import resolve_blk_style
 # ── 統計事件類型 ──────────────────────────────────────────────
 class OcrEventType:
     PLAN_A_OK  = 'plan_a_ok'   # 綠  原圖全頁成功
-    FONT_WARN  = 'plan_a2_ok'  # 黃  [借用舊版信號] 字型異常警告 (過大或過小)
+    FONT_WARN  = 'plan_a2_ok'  # 黃△ 字型嚴重過小（雙條件同時成立）
     SLICE_OK   = 'slice_ok'    # 橘  Plan B 切片（主API）成功
     GROK_OK    = 'grok_ok'     # 粉  Grok 成功（切片或全頁）
     ERROR      = 'error'       # 紅  最終放棄此頁
-    DET_WARN   = 'det_warn'    # 黃方 偵測方向異常（CTD/YOLO 方向矛盾）
+    DET_WARN   = 'det_warn'    # 黃■ 字型疑似過小（單條件成立）
     BOX_OOB    = 'box_oob'    # 紅矩 對話框凸出圖片範圍
 
 
