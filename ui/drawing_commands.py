@@ -83,8 +83,17 @@ class RunBlkTransCommand(QUndoCommand):
     def __init__(self, canvas: Canvas, blkitems: List[TextBlkItem], transpairw_list: List[TransPairWidget],  mode: int):
         super().__init__()
 
+        # mode 0: OCR only
+        # mode 1: OCR + translate
+        # mode 2: OCR + translate + inpaint
+        # mode 3: inpaint only
+        # mode 4: OCR + inpaint (no translate)
+        do_ocr = mode in (0, 1, 2, 4)
+        do_translate = mode in (1, 2)
+        do_inpaint = mode in (2, 3, 4)
+
         self.empty_command = None
-        if mode > 1:
+        if do_inpaint:
             self.empty_command = EmptyCommand()
             canvas.push_draw_command(self.empty_command)
 
@@ -93,15 +102,16 @@ class RunBlkTransCommand(QUndoCommand):
         self.transpairw_list = transpairw_list
         self.has_trans = set()  # 記錄哪些 blkitem 有寫入翻譯欄
 
-        if mode < 3:
+        if do_ocr or do_translate:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
-                trs = blkitem.blk.translation
-                if mode != 0 or trs:
-                    transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
-                    blkitem.setPlainTextAndKeepUndoStack(trs)
-                    self.has_trans.add(id(blkitem))
-                blkitem.blk.rich_text = ''
-                if mode >= 0:
+                if do_translate:
+                    trs = blkitem.blk.translation
+                    if trs:
+                        transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
+                        blkitem.setPlainTextAndKeepUndoStack(trs)
+                        self.has_trans.add(id(blkitem))
+                    blkitem.blk.rich_text = ''
+                if do_ocr:
                     transpairw.e_source.setPlainTextAndKeepUndoStack(blkitem.blk.get_text())
                     blkitem.setVertical(blkitem.blk.vertical)
                     from ui.textitem import calc_font_size_by_render
@@ -112,7 +122,10 @@ class RunBlkTransCommand(QUndoCommand):
 
         self.canvas = canvas
         self.mode = mode
-        if mode > 1:
+        self.do_ocr = do_ocr
+        self.do_translate = do_translate
+        self.do_inpaint = do_inpaint
+        if do_inpaint:
             self.undo_img_list = []
             self.undo_mask_list = []
             self.redo_img_list = []
@@ -146,7 +159,7 @@ class RunBlkTransCommand(QUndoCommand):
         if self.empty_command is not None:
             self.empty_command.redo()
 
-        if self.mode > 1 and self.num_inpainted > 0:
+        if self.do_inpaint and self.num_inpainted > 0:
             img_array = self.canvas.imgtrans_proj.inpainted_array
             mask_array = self.canvas.imgtrans_proj.mask_array
             for inpaint_rect, redo_img, redo_mask in zip(self.inpaint_rect_lst, self.redo_img_list, self.redo_mask_list):
@@ -162,12 +175,12 @@ class RunBlkTransCommand(QUndoCommand):
             self.op_counter += 1
             return
 
-        if self.mode < 3:
+        if self.do_ocr or self.do_translate:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
                 if id(blkitem) in self.has_trans:
                     transpairw.e_trans.redo()
                     blkitem.redo()
-                if self.mode >= 0:
+                if self.do_ocr:
                     transpairw.e_source.redo()
 
     def undo(self) -> None:
@@ -175,7 +188,7 @@ class RunBlkTransCommand(QUndoCommand):
         if self.empty_command is not None:
             self.empty_command.undo()
 
-        if self.mode > 1 and self.num_inpainted > 0:
+        if self.do_inpaint and self.num_inpainted > 0:
             img_array = self.canvas.imgtrans_proj.inpainted_array
             mask_array = self.canvas.imgtrans_proj.mask_array
             for inpaint_rect, undo_img, undo_mask in zip(self.inpaint_rect_lst, self.undo_img_list, self.undo_mask_list):
@@ -187,10 +200,10 @@ class RunBlkTransCommand(QUndoCommand):
                 mask_view[:] = undo_mask
             self.canvas.updateLayers()
 
-        if self.mode < 3:
+        if self.do_ocr or self.do_translate:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
                 if id(blkitem) in self.has_trans:
                     transpairw.e_trans.undo()
                     blkitem.undo()
-                if self.mode >= 0:
+                if self.do_ocr:
                     transpairw.e_source.undo()

@@ -5,6 +5,18 @@ import traceback
 from qtpy.QtCore import Qt, Signal, QUrl, QThread
 from qtpy.QtGui import QImage, QPixmap
 from qtpy.QtWidgets import QDialog, QMessageBox, QFileDialog
+from PIL import Image as PILImage
+
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    _AVIF_SUPPORTED = True
+except ImportError:
+    try:
+        import pillow_avif  # registers AVIF handler into PIL.Image.SAVE
+        _AVIF_SUPPORTED = True
+    except ImportError:
+        _AVIF_SUPPORTED = False
 
 from utils.logger import logger as LOGGER
 from utils.io_utils import imread, imwrite
@@ -56,7 +68,15 @@ class ImgSaveThread(ThreadBase):
                 break
             save_path, img, pagename_in_proj, save_params = self.im_save_list.pop(0)
             if isinstance(img, QImage) or isinstance(img, QPixmap):
-                if save_params is not None and save_params['ext'] in {'.jpg', '.webp'}:
+                ext = save_params['ext'] if save_params is not None else None
+                if ext == '.avif':
+                    qimg = img if isinstance(img, QImage) else img.toImage()
+                    qimg = qimg.convertToFormat(QImage.Format.Format_RGB888)
+                    ptr = qimg.bits()
+                    ptr.setsize(qimg.bytesPerLine() * qimg.height())
+                    pil_img = PILImage.frombytes('RGB', (qimg.width(), qimg.height()), bytes(ptr), 'raw', 'RGB', qimg.bytesPerLine())
+                    pil_img.save(save_path, format='AVIF', quality=save_params['quality'])
+                elif ext in {'.jpg', '.webp'}:
                     img.save(save_path, quality=save_params['quality'])
                 else:
                     img.save(save_path)

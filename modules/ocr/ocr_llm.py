@@ -60,18 +60,46 @@ def _fmt_api_error(data: dict) -> str:
 class GeminiClient:
     BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
 
-    def __init__(self, api_key: str, model: str = 'gemini-3.1-flash-lite-preview'):
+    def __init__(self, api_key: str, model: str = 'gemini-3.1-flash-lite-preview',
+                 thinking_budget: int = 0, thinking_level: bool = False,
+                 thinking_level_gemini3: str = 'medium'):
         self.api_key = api_key
         self.model = model
+        self.thinking_budget = thinking_budget
+        self.thinking_level = thinking_level              # bool（gemma-4：True=high, False=不啟用）
+        self.thinking_level_gemini3 = thinking_level_gemini3  # minimal/low/medium/high（gemini-3.x 專用）
+
+    _GEMMA4_MODELS  = {'gemma-4-31b-it', 'gemma-4-26b-a4b-it'}
+    _GEMINI3_MODELS = {'gemini-flash-latest', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'}
 
     def ocr(self, img_b64: str, prompt: str, timeout: int = 120) -> str:
         url = self.BASE_URL.format(model=self.model) + f'?key={self.api_key}'
+        is_gemma4   = self.model in self._GEMMA4_MODELS
+        is_gemini3  = self.model in self._GEMINI3_MODELS
+
+        if is_gemma4:
+            # gemma-4：不傳 thinkingConfig = 不啟用思考；傳 high = 啟用
+            gen_config = {'temperature': 0.0, 'response_mime_type': 'application/json'}
+            if self.thinking_level:
+                gen_config['thinkingConfig'] = {'thinkingLevel': 'high'}
+        elif is_gemini3:
+            # Gemini 3.x 原生思考模型：thinkingLevel（low/medium/high）
+            # none = 不傳 thinkingConfig，讓模型使用預設
+            gen_config = {'temperature': 1.0, 'response_mime_type': 'application/json'}
+            if self.thinking_level_gemini3 and self.thinking_level_gemini3 != 'none':
+                gen_config['thinkingConfig'] = {'thinkingLevel': self.thinking_level_gemini3}
+        else:
+            gen_config = {'temperature': 0.0, 'response_mime_type': 'application/json'}
+            # 2.5 系列：thinkingBudget 整數（0=關閉）
+            if 'gemini-2.5' in self.model and self.thinking_budget > 0:
+                gen_config['thinkingConfig'] = {'thinkingBudget': self.thinking_budget}
+
         payload = {
             'contents': [{'parts': [
                 {'text': prompt},
                 {'inline_data': {'mime_type': 'image/jpeg', 'data': img_b64}}
             ]}],
-            'generationConfig': {'temperature': 0.0, 'response_mime_type': 'application/json'},
+            'generationConfig': gen_config,
             'safetySettings': [
                 {'category': 'HARM_CATEGORY_HARASSMENT',        'threshold': 'BLOCK_NONE'},
                 {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
@@ -136,6 +164,8 @@ class OCRLlm(OCRBase):
         'gemini-3.1-flash-lite-preview',
         'gemini-2.5-flash',
         'gemini-2.5-flash-lite',
+        'gemma-4-31b-it',
+        'gemma-4-26b-a4b-it',
         'grok-4.20-0309-reasoning',
         'grok-4.20-0309-non-reasoning',
         'grok-4-1-fast-reasoning',
@@ -152,12 +182,40 @@ class OCRLlm(OCRBase):
             'value': 'gemini-3.1-flash-lite-preview',
             'description': '主模型（空 = 不使用）'
         },
+        'thinking_budget': {'value': '1024',
+                            'description': '主模型 Gemini 2.5 思考模式 token 上限（0=關閉；建議 512~2048；最大 24576）',
+                            'controlled_by': 'model',
+                            'visible_for_models': ['gemini-2.5']},
+        'thinking_level_gemini3': {'type': 'selector',
+                            'options': ['minimal', 'low', 'medium', 'high'],
+                            'value': 'medium',
+                            'description': '主模型 Gemini 3.x 思考深度（minimal=最低延遲；high=最深推理）',
+                            'controlled_by': 'model',
+                            'visible_for_models': ['gemini-3', 'gemini-flash-latest']},
+        'thinking_level':  {'type': 'checkbox', 'value': False,
+                            'description': '主模型 Gemma 4 開啟思考模式（勾選=high，不勾=不啟用）',
+                            'controlled_by': 'model',
+                            'visible_for_models': ['gemma-4']},
         'fallback_model': {
             'type': 'selector',
             'options': _MODEL_OPTIONS,
             'value': 'grok-4.20-0309-non-reasoning',
             'description': '備援模型（空 = 不使用備援）'
         },
+        'fallback_thinking_budget': {'value': '1024',
+                            'description': '備援模型 Gemini 2.5 思考模式 token 上限（0=關閉；建議 512~2048；最大 24576）',
+                            'controlled_by': 'fallback_model',
+                            'visible_for_models': ['gemini-2.5']},
+        'fallback_thinking_level_gemini3': {'type': 'selector',
+                            'options': ['minimal', 'low', 'medium', 'high'],
+                            'value': 'medium',
+                            'description': '備援模型 Gemini 3.x 思考深度（minimal=最低延遲；high=最深推理）',
+                            'controlled_by': 'fallback_model',
+                            'visible_for_models': ['gemini-3', 'gemini-flash-latest']},
+        'fallback_thinking_level': {'type': 'checkbox', 'value': False,
+                            'description': '備援模型 Gemma 4 開啟思考模式（勾選=high，不勾=不啟用）',
+                            'controlled_by': 'fallback_model',
+                            'visible_for_models': ['gemma-4']},
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_scale': {'value': '1.0', 'description': '字體大小縮放（0.5 縮小一半；1.0 不縮放；1.2 放大 20%）'},
@@ -205,7 +263,7 @@ class OCRLlm(OCRBase):
     # ── helpers ───────────────────────────────────────────────
     @staticmethod
     def _is_gemini(model: str) -> bool:
-        return model.startswith('gemini')
+        return model.startswith('gemini') or model.startswith('gemma')
 
     @staticmethod
     def _xai_base_url() -> str:
@@ -268,6 +326,32 @@ class OCRLlm(OCRBase):
     def disable_plan_a(self) -> bool:   return bool(self.params['disable_plan_a']['value'])
     @property
     def disable_plan_b(self) -> bool:   return bool(self.params['disable_plan_b']['value'])
+    @property
+    def thinking_budget(self) -> int:
+        try: return int(self.params['thinking_budget']['value'])
+        except: return 0
+    @property
+    def thinking_level(self) -> bool:
+        v = self.params.get('thinking_level', {}).get('value', False)
+        if isinstance(v, bool): return v
+        return str(v).lower().strip() == 'true'
+    @property
+    def thinking_level_gemini3(self) -> str:
+        try: return str(self.params['thinking_level_gemini3']['value'])
+        except: return 'medium'
+    @property
+    def fallback_thinking_budget(self) -> int:
+        try: return int(self.params['fallback_thinking_budget']['value'])
+        except: return 0
+    @property
+    def fallback_thinking_level(self) -> bool:
+        v = self.params.get('fallback_thinking_level', {}).get('value', False)
+        if isinstance(v, bool): return v
+        return str(v).lower().strip() == 'true'
+    @property
+    def fallback_thinking_level_gemini3(self) -> str:
+        try: return str(self.params['fallback_thinking_level_gemini3']['value'])
+        except: return 'medium'
 
     # ── 統計事件 ──────────────────────────────────────────────
     def _emit(self, event_type: str, imgname: str = ''):
@@ -282,7 +366,10 @@ class OCRLlm(OCRBase):
         key = self._api_key_for(self.model)
         if not key: return
         if self._is_gemini(self.model):
-            self.client = GeminiClient(api_key=key, model=self.model)
+            self.client = GeminiClient(api_key=key, model=self.model,
+                                       thinking_budget=self.thinking_budget,
+                                       thinking_level=self.thinking_level,
+                                       thinking_level_gemini3=self.thinking_level_gemini3)
         else:
             self.client = OpenAICompatClient(api_key=key, model=self.model, base_url=self._xai_base_url())
 
@@ -291,7 +378,10 @@ class OCRLlm(OCRBase):
         key = self._api_key_for(self.fallback_model)
         if not key: return None
         if self._is_gemini(self.fallback_model):
-            return GeminiClient(api_key=key, model=self.fallback_model)
+            return GeminiClient(api_key=key, model=self.fallback_model,
+                                thinking_budget=self.fallback_thinking_budget,
+                                thinking_level=self.fallback_thinking_level,
+                                thinking_level_gemini3=self.fallback_thinking_level_gemini3)
         return OpenAICompatClient(api_key=key, model=self.fallback_model, base_url=self._xai_base_url())
 
     # ── 速率控制 ──────────────────────────────────────────────
@@ -431,7 +521,7 @@ class OCRLlm(OCRBase):
                     self.logger.error(f"API錯誤：{reason}")
                     return f'ERR:{reason}'
         reason = 'API重試耗盡'
-        self.logger.error(reason)
+        self.logger.error(f"{reason}（overload={overload_attempt}次 ratelimit={ratelimit_attempt}次 timeout={timeout_attempt}次 最後錯誤={err[:120]}）")
         return f'ERR:{reason}'
 
     def _call_ocr_grok(self, img: np.ndarray, prompt: str, log_prefix: str,
@@ -450,19 +540,141 @@ class OCRLlm(OCRBase):
                 self.logger.error(f"{log_prefix} Grok 失敗: {code_str}")
             return code_str if silent else ''
 
+    @staticmethod
+    def _clean_translation(t: str) -> str:
+        """清理 LLM 在 translation 欄位摻入的推理垃圾：括號英文說明、字面 \\n 等。"""
+        if not t:
+            return t
+        # 移除括號內全英文/數字的說明段落，例如 (or ...) / (Double check...) / (It's an...)
+        t = re.sub(r'\s*\([A-Za-z0-9\'",.\s\-\?\!]+\)', '', t)
+        # 移除字面的 \n（非真正換行，而是文字「\n」）
+        t = re.sub(r'\\n', '', t)
+        # 移除 "Final JSON" / "double check" / "Note:" 等英文垃圾行
+        t = re.sub(r'(?i)(final json|double check|note:|translation:|original:).*', '', t)
+        return t.strip()
+
+    # ── gemma-4 markdown bullet 格式解析 ─────────────────────
+    def _parse_gemma4_markdown(self, text: str,
+                               blk_list: List[TextBlock],
+                               visual_order: list = None) -> bool:
+        """
+        解析 gemma-4 輸出的 markdown bullet 格式，支援多種變體：
+          格式A: *   **Cell 0:**  (縮排 bullet + bold)
+                     *   Text: ...  /  *   Translation: ...
+          格式B: - Index 0:
+                     - Text: ...  /  - Translation: ...
+          格式C: *   Cell 0: "文字" (Vertical)  (一行式，無子欄位)
+                     *   Cell 0: "文字" -> "翻譯"
+        """
+        # 統一用寬鬆 pattern：忽略行首任意 bullet/bold 符號（*、-、空白），
+        # 匹配 Cell N: / Index N: / **Cell N:** / *   **Cell 0:** 等所有變體
+        cell_blocks = re.split(
+            r'(?:^|\n)[*\-\s]*\*{0,2}\s*(?:[Cc]ell|[Ii]ndex)\s+(\d+)\s*\*{0,2}\s*:',
+            text
+        )
+        # split 結果：[前置文字, index, 內容, index, 內容, ...]
+        matched = 0
+        i = 1
+        while i + 1 < len(cell_blocks):
+            try:
+                visual_idx = int(cell_blocks[i])
+                block_text = cell_blocks[i + 1]
+            except (ValueError, IndexError):
+                i += 2
+                continue
+
+            def _extract(pattern, s=block_text):
+                m = re.search(pattern, s, re.IGNORECASE | re.DOTALL)
+                return m.group(1).strip() if m else ''
+
+            # 格式A/B：有 Text: 欄位
+            original = _extract(r'[Tt]ext\s*:\s*"?(.+?)"?\s*(?=\n|$)')
+            # 格式C：`"文字" (Vertical)` 或 `"文字" ->` 一行式，直接在 block_text 第一行
+            if not original:
+                original = _extract(r'^\s*"([^"]+)"')
+            direction   = _extract(r'[Dd]irection\s*[:\(].*?([vh])')
+            # 格式C direction 可能是 `(Vertical)` 或 `(Horizontal)`
+            if not direction:
+                direction = 'v' if re.search(r'[Vv]ertical', block_text) else (
+                            'h' if re.search(r'[Hh]orizontal', block_text) else '')
+            handwritten = _extract(r'[Hh]andwritten\s*:\s*(true|false)')
+            font_raw    = _extract(r'[Ff]ont\s*size\s*:\s*~?(\d+)')
+            # 格式A/B：Translation: 欄位
+            translation = _extract(r'[Tt]ranslation\s*:\s*"?(.+?)"?\s*(?=\n\s*[-\*\d]|\n\s*\w+\s*:|\Z)')
+            # 格式C：`"原文" -> "翻譯"` 或 `"原文" -> 翻譯`
+            if not translation:
+                translation = _extract(r'->\s*"?(.+?)"?\s*(?=\n|\(|\Z)')
+
+            if not original:
+                i += 2
+                continue
+
+            if visual_order is not None:
+                if visual_idx < 0 or visual_idx >= len(visual_order):
+                    i += 2
+                    continue
+                idx = visual_order[visual_idx]
+            else:
+                idx = visual_idx
+            if idx < 0 or idx >= len(blk_list):
+                i += 2
+                continue
+
+            blk = blk_list[idx]
+            blk.text = [original]
+            blk.translation = self._clean_translation(translation)
+
+            if isinstance(blk.obs, dict):
+                from utils.textblock import RawObservations
+                blk.obs = RawObservations(**{k: v for k, v in blk.obs.items() if k in RawObservations.__dataclass_fields__})
+
+            if direction.lower() == 'v':
+                blk.obs.ocr_says_vertical = True
+            elif direction.lower() == 'h':
+                blk.obs.ocr_says_vertical = False
+            blk.obs.ocr_src_text = original
+            blk.obs.ocr_is_handwritten = handwritten.lower() == 'true'
+            blk.obs.ocr_font_size_px = float(font_raw) if font_raw else -1
+            matched += 1
+            i += 2
+
+        return matched > 0
+
     # ── 解析全頁結果（index-based，不需座標配對）────────────
     def _parse_fullpage_result(self, response_text: str,
                                 blk_list: List[TextBlock],
-                                visual_order: list = None) -> bool:
+                                visual_order: list = None,
+                                is_gemma4: bool = False) -> bool:
         try:
             clean = re.sub(r'```json\s*|\s*```', '', response_text).strip()
+            # gemma-4 thinking 輸出格式：<|channel>thought\n...\n<channel|>[最終答案]
+            # 若有 <channel|> 標記，只取後面的部分
+            if is_gemma4 and '<channel|>' in clean:
+                clean = clean.split('<channel|>', 1)[-1].strip()
+                self.logger.warning(f'[gemma4 debug] 偵測到 thinking 標記，已切割至 <channel|> 後，前200字: {repr(clean[:200])}')
+            # 若回應不是以 [ 開頭，先嘗試抓 [...] 區塊
+            if not clean.startswith('['):
+                # 要求 [ 後面緊接 { 或空白+{，避免抓到 "[ and ends with ]" 這種描述文字
+                m = re.search(r'(\[\s*\{.*\}\s*\])', clean, re.DOTALL)
+                if m:
+                    clean = m.group(1)
+                else:
+                    # gemma-4 fallback：從 markdown bullet 格式抽取
+                    self.logger.warning(f'[gemma4 debug] 找不到 [...] 區塊，原始回應全文:\n{clean}')
+                    parsed = self._parse_gemma4_markdown(clean, blk_list, visual_order)
+                    return parsed
+
             # 移除 JSON 字串值內的原始控制字元（\x00-\x1f，排除合法的 \n \r \t）
             clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', clean)
             # 將 JSON 字串值內的裸換行符轉成合法的 \n 逸脫（LLM 偶爾直接換行而非輸出 \\n）
             clean = re.sub(r'"((?:[^"\\]|\\.)*)"',
                            lambda m: '"' + m.group(1).replace('\n', '\\n').replace('\r', '\\r') + '"',
                            clean)
-            results = json.loads(clean)
+            # raw_decode 只消費第一個合法 JSON 值，忽略尾端垃圾（3 Flash 已知會在陣列後多輸出 ] / "} 等片段）
+            try:
+                results, _ = json.JSONDecoder().raw_decode(clean.lstrip())
+            except json.JSONDecodeError:
+                results = json.loads(clean)
             if not isinstance(results, list) or not results:
                 return False
 
@@ -486,7 +698,8 @@ class OCRLlm(OCRBase):
                 
                 blk = blk_list[idx]
                 blk.text = [item['original']]
-                blk.translation = item.get('translation', '')
+                trans = item.get('translation', '')
+                blk.translation = self._clean_translation(trans) if is_gemma4 else trans
 
                 # 確保 obs 是物件而不是 dict
                 if isinstance(blk.obs, dict):
@@ -505,7 +718,10 @@ class OCRLlm(OCRBase):
 
             return matched > 0
         except Exception as e:
-            self.logger.warning(f"全頁解析失敗: {e}")
+            self.logger.warning(f"全頁解析失敗: {e} | clean全文:\n{clean}")
+            if is_gemma4:
+                # JSON 壞掉（[ and ends with ] 或 ... 省略號等），用原始回應跑 markdown 解析
+                return self._parse_gemma4_markdown(response_text, blk_list, visual_order)
             return False
 
     # ── 全頁模式（單次） ──────────────────────────────────────
@@ -549,6 +765,32 @@ class OCRLlm(OCRBase):
         'is_handwritten: true if the text appears to be hand-drawn or artistic lettering (not a standard printed font).\n'
         'font_size_px: estimate the height of a single character in pixels.\n'
         'If a cell has no readable text: {"index": N, "direction": "v", "is_handwritten": false, "font_size_px": 0, "original": "", "translation": ""}\n'
+        "Total cells: {n}"
+    )
+
+    # Gemma-4 專屬提示詞：強制禁止思考文字混入 JSON 欄位
+    _GRID_PROMPT_GEMMA4 = (
+        "This image is a grid of manga text box crops.\n"
+        "Each cell is bordered and has a black label on its LEFT side showing its index number.\n"
+        "CRITICAL: Each bordered cell is ONE independent text box. Do NOT merge text from different cells.\n"
+        "Use the label numbers to identify each cell — do NOT count or guess order.\n"
+        "Read the Japanese text in each cell and translate to Traditional Chinese.\n"
+        "\n"
+        "STRICT OUTPUT RULES — you MUST follow these exactly:\n"
+        "1. Output ONLY a valid JSON array. Nothing else.\n"
+        "2. The 'original' field: ONLY the Japanese text from that cell. Nothing else.\n"
+        "3. The 'translation' field: ONLY the Traditional Chinese translation. "
+        "NO English. NO explanations. NO notes. NO 'Refining translations'. "
+        "NO alternative translations. NO parenthetical remarks. ONLY Chinese characters.\n"
+        "4. Do NOT put any thinking, reasoning, or analysis into any JSON field.\n"
+        "5. If you are unsure of a translation, output your best guess directly in Chinese — do NOT write your reasoning.\n"
+        "\n"
+        "Output format (one entry per cell):\n"
+        '[{"index": 0, "direction": "v", "is_handwritten": false, "font_size_px": 24, "original": "日文原文", "translation": "繁體中文翻譯"}, ...]\n'
+        'direction: "v"=vertical, "h"=horizontal.\n'
+        'is_handwritten: true only if hand-drawn lettering.\n'
+        'font_size_px: estimate character height in pixels.\n'
+        'No readable text in a cell: {"index": N, "direction": "v", "is_handwritten": false, "font_size_px": 0, "original": "", "translation": ""}\n'
         "Total cells: {n}"
     )
 
@@ -652,8 +894,13 @@ class OCRLlm(OCRBase):
     def _run_fullpage_impl(self, img: np.ndarray, blk_list: List[TextBlock], client=None):
         """全頁模式核心邏輯，可傳入 client 供 Plan C 使用 fallback model。"""
         _client = client if client is not None else self.client
-        # Gemini 有原生 JSON 格式強制（response_mime_type），其他模型用加強版提示詞
-        base_prompt = self._GRID_PROMPT if isinstance(_client, GeminiClient) else self._GRID_PROMPT_STRICT
+        is_gemma4 = isinstance(_client, GeminiClient) and _client.model in GeminiClient._GEMMA4_MODELS
+        if is_gemma4:
+            base_prompt = self._GRID_PROMPT_GEMMA4
+        elif not isinstance(_client, GeminiClient):
+            base_prompt = self._GRID_PROMPT_STRICT
+        else:
+            base_prompt = self._GRID_PROMPT
         grid_img, visual_order = self._build_grid_img(img, blk_list)
         prompt = base_prompt.replace('{n}', str(len(blk_list)))
         for attempt in range(2):
@@ -667,11 +914,13 @@ class OCRLlm(OCRBase):
                 return resp[4:], 0
             if not resp:
                 return 'API無回應', 0
-            matched = self._parse_fullpage_result(resp, blk_list, visual_order)
+            matched = self._parse_fullpage_result(resp, blk_list, visual_order, is_gemma4=is_gemma4)
             if matched:
                 return 'ok', matched
             if attempt == 0:
-                self.logger.warning('Plan A JSON解析失敗，重試一次...')
+                self.logger.warning(f'Plan A JSON解析失敗，重試一次... | 原始回應全文:\n{resp}')
+            else:
+                self.logger.warning(f'Plan A 第二次解析失敗 | 原始回應全文:\n{resp}')
         return 'JSON解析失敗', 0
 
     # ── 切片模式 ──────────────────────────────────────────────
@@ -719,6 +968,29 @@ class OCRLlm(OCRBase):
             if not clean or clean in ('{}', '[]'):
                 self._emit(OcrEventType.ERROR, imgname)
                 return idx, None
+            # gemma-4 可能把思考文字混在前面，嘗試找第一個 {...} 區塊
+            if not clean.startswith('{'):
+                m = re.search(r'(\{.*?\})', clean, re.DOTALL)
+                if m:
+                    clean = m.group(1)
+                else:
+                    # 從思考文字直接抓 original / translation
+                    orig_m  = re.search(r'[Oo]riginal["\s:]+([^\n"]+)', clean)
+                    trans_m = re.search(r'[Tt]ranslation["\s:]+([^\n"]+)', clean)
+                    dir_m   = re.search(r'[Dd]irection["\s:]+([vh])', clean)
+                    if orig_m:
+                        original = orig_m.group(1).strip().strip('"')
+                        translation = trans_m.group(1).strip().strip('"') if trans_m else ''
+                        blk.text = [original]
+                        blk.translation = translation
+                        blk.obs.ocr_src_text = original
+                        if dir_m:
+                            blk.obs.ocr_says_vertical = dir_m.group(1).lower() == 'v'
+                        self._emit(OcrEventType.GROK_OK if used_grok else OcrEventType.SLICE_OK, imgname)
+                        return idx, blk
+                    self.logger.warning(f"{log_prefix} 切片 {idx+1} 解析失敗: 找不到 JSON 區塊")
+                    self._emit(OcrEventType.ERROR, imgname)
+                    return idx, None
             data = json.loads(clean)
             if isinstance(data, list):
                 data = data[0] if data else {}

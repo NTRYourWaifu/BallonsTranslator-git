@@ -111,20 +111,67 @@ class ColoredLogger(logging.Logger):
             self._log(EXPENSIVE_LEVEL, msg, args, **kwargs)
 
 
+_run_log_dir: str = ''
+_run_log_records: list = []
+_run_log_handler: logging.Handler = None
+_RUN_LOG_FMT = logging.Formatter("[%(levelname)-8s] %(module)s:%(funcName)s:%(lineno)s - %(message)s")
+
+
+class _RunLogCapture(logging.Handler):
+    """攔截所有 log record 存到 buffer，flush 時寫入檔案。"""
+    def emit(self, record):
+        _run_log_records.append(record)
+
+
+def start_run_log():
+    """任務開始：清空上輪 buffer，開始收集本輪 log。"""
+    global _run_log_handler
+    _run_log_records.clear()
+    if _run_log_handler is None:
+        _run_log_handler = _RunLogCapture()
+        _run_log_handler.setLevel(logging.DEBUG)
+        logger.addHandler(_run_log_handler)
+
+
+def flush_run_log(reason: str = 'finished'):
+    """任務結束/停止/關閉：把 buffer 寫到新的時間戳檔案。"""
+    if not _run_log_records or not _run_log_dir:
+        return
+    ts = datetime.datetime.now().strftime('%Y_%m_%d-%H_%M_%S')
+    fname = f'run_{ts}_{reason}.log'
+    fpath = osp.join(_run_log_dir, fname)
+    try:
+        with open(fpath, 'w', encoding='utf-8') as f:
+            for record in _run_log_records:
+                try:
+                    f.write(_RUN_LOG_FMT.format(record) + '\n')
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f'flush_run_log 失敗: {e}')
+    _run_log_records.clear()
+
+
 def setup_logging(logfile_dir: str, max_num_logs=14):
+    global _run_log_dir
+    _run_log_dir = logfile_dir
     if not osp.exists(logfile_dir):
         os.makedirs(logfile_dir)
     else:
-        old_logs = glob(osp.join(logfile_dir, '*.log'))
-        old_logs.sort()
+        # 保留最新的 session log（*.log）和 run log（run_*.log），各自計算上限
+        old_logs = sorted(glob(osp.join(logfile_dir, '_*.log')))
         n_log = len(old_logs)
         if n_log >= max_num_logs:
-            to_remove = n_log - max_num_logs + 1
-            try:
-                for ii in range(to_remove):
-                    os.remove(old_logs[ii])
-            except Exception as e:
-                logger.error(e)
+            for p in old_logs[:n_log - max_num_logs + 1]:
+                try: os.remove(p)
+                except Exception: pass
+        # run log 最多保留 50 個
+        old_runs = sorted(glob(osp.join(logfile_dir, 'run_*.log')))
+        n_run = len(old_runs)
+        if n_run >= 50:
+            for p in old_runs[:n_run - 50 + 1]:
+                try: os.remove(p)
+                except Exception: pass
 
     logfilename = datetime.datetime.now().strftime('_%Y_%m_%d-%H_%M_%S.log')
     logfilep = osp.join(logfile_dir, logfilename)

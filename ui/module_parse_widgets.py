@@ -137,6 +137,11 @@ class ParamWidget(QWidget):
         if 'description' in params:
             self.setToolTip(params['description'])
 
+        # param_key -> (label_widget, input_widget, visible_for_models, controlled_by)
+        self._row_widgets: dict = {}
+        # controller_param_key -> ParamComboBox，每個 selector 各自管自己的從屬欄位
+        self._controller_selectors: dict = {}
+
         for ii, param_key in enumerate(params):
             if param_key == 'description':
                 continue
@@ -146,6 +151,7 @@ class ParamWidget(QWidget):
             is_str = isinstance(params[param_key], str)
             is_digital = isinstance(params[param_key], float) or isinstance(params[param_key], int)
             param_widget = None  # Инициализация переменной
+            visible_for_models = None  # None = 永遠顯示
 
             if isinstance(params[param_key], bool):
                 param_widget = ParamCheckBox(param_key)
@@ -167,6 +173,8 @@ class ParamWidget(QWidget):
                 value = params[param_key]['value']
                 param_widget = None  # Ensure initialization
                 param_type = param_dict['type'] if 'type' in param_dict else 'line_editor'
+                visible_for_models = param_dict.get('visible_for_models', None)
+                controlled_by = param_dict.get('controlled_by', None)
 
                 if param_type == 'selector':
                     if 'url' in param_key:
@@ -184,6 +192,10 @@ class ParamWidget(QWidget):
                                 item = model.item(ii, 0)
                                 item.setEnabled(False)
                     param_widget.setCurrentText(str(value))
+
+                    # 若這個 selector 本身有 visible_for_models 的子欄位，記錄它
+                    if visible_for_models is None:
+                        self._controller_selectors[param_key] = param_widget
 
                 elif param_type == 'editor':
                     param_widget = ParamEditor(param_key)
@@ -210,6 +222,7 @@ class ParamWidget(QWidget):
                         param_widget.setToolTip(param_dict['description'])
 
             widget_idx = 0
+            param_label = None
             if require_label:
                 param_label = ParamNameLabel(display_param_name)
                 param_layout.addWidget(param_label, ii, 0)
@@ -218,6 +231,28 @@ class ParamWidget(QWidget):
                 param_layout.addWidget(param_widget, ii, widget_idx)
             else:
                 raise ValueError(f"Failed to initialize widget for key: {param_key}")
+
+            # 記錄每列的 label/widget 以及可見性條件
+            if visible_for_models is not None:
+                self._row_widgets[param_key] = (param_label, param_widget, visible_for_models, controlled_by)
+
+        # 為每個 controller selector 連接切換事件，並初始化顯示/隱藏
+        for ctrl_key, ctrl_widget in self._controller_selectors.items():
+            ctrl_widget.currentTextChanged.connect(
+                lambda model_name, k=ctrl_key: self._on_controller_changed(k, model_name)
+            )
+            self._on_controller_changed(ctrl_key, ctrl_widget.currentText())
+
+    def _on_controller_changed(self, controller_key: str, model_name: str):
+        """根據指定 controller selector 的目前值，顯示/隱藏其管轄的從屬欄位。"""
+        for param_key, (label, widget, patterns, controlled_by) in self._row_widgets.items():
+            if controlled_by != controller_key:
+                continue
+            visible = any(p in model_name for p in patterns)
+            if label is not None:
+                label.setVisible(visible)
+            if widget is not None:
+                widget.setVisible(visible)
 
     def on_paramwidget_edited(self, param_key, param_content):
         content_dict = {'content': param_content}

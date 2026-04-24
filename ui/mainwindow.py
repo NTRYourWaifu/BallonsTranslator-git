@@ -10,7 +10,7 @@ from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout
 from qtpy.QtCore import Qt, QPoint, QPointF, QSize, QEvent, Signal, QTimer
 from qtpy.QtGui import QContextMenuEvent, QTextCursor, QGuiApplication, QIcon, QCloseEvent, QKeySequence, QKeyEvent, QPainter, QClipboard, QBrush, QColor
 
-from utils.logger import logger as LOGGER
+from utils.logger import logger as LOGGER, start_run_log, flush_run_log
 from utils.text_processing import is_cjk, full_len, half_len
 from utils.textblock import TextBlock, TextAlignment
 from utils import shared
@@ -26,6 +26,7 @@ from .textedit_area import SourceTextEdit, SelectTextMiniMenu, TransTextEdit
 from .drawingpanel import DrawingPanel
 from .scenetext_manager import SceneTextManager, TextPanel, PasteSrcItemsCommand
 from .mainwindowbars import TitleBar, LeftBar, BottomBar
+from .schedule_dialog import ScheduleDialog
 from .io_thread import ImgSaveThread, ImportDocThread, ExportDocThread
 from .custom_widget import Widget, ViewWidget
 from .global_search_widget import GlobalSearchWidget
@@ -154,8 +155,10 @@ class MainWindow(mainwindow_cls):
         self._gui_batch_current = None
         self._gui_batch_running = False
         self._page_ocr_cache: dict = {}   # {folder_path: {imgname: {event_type: count}}}
+        self._current_run_page_indices: set = None  # 單頁/部分執行時限制接受的 page_index，None = 全量
         self._ocr_done_queue: list = []   # 待處理的 on_page_ocr_trans_done imgname 佇列
         self._ocr_done_processing = False  # 是否正在處理中
+        self._schedule_dialog: ScheduleDialog = None
 
         self.setupThread()
         self.setupUi()
@@ -368,9 +371,11 @@ class MainWindow(mainwindow_cls):
         module_manager.imgtrans_thread.page_inpaint_done.connect(self.on_page_inpaint_done)
 
         self.leftBar.run_imgtrans.connect(self.on_run_imgtrans)
+        self.leftBar.scheduleBtn.clicked.connect(self.on_schedule_btn_clicked)
         self.leftBar.export_all_pages.connect(self.on_export_all_pages)
         self.leftBar.stopBtn.clicked.connect(self.on_stop_imgtrans)
         self.leftBar.resumeHereBtn.clicked.connect(self.on_resume_here)
+        self.leftBar.run_current_page.connect(self.on_run_current_page)
         self.leftBar.measureFontBtn.clicked.connect(self.on_measure_font_ratio)
         self.leftBar.applyFontScaleBtn.clicked.connect(self.on_apply_font_scale)
         self.bottomBar.inpaint_btn_clicked.connect(self.inpaintBtnClicked)
@@ -535,6 +540,7 @@ class MainWindow(mainwindow_cls):
             self.leftStackWidget.hide()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        flush_run_log('closed')
         self.st_manager.hovering_transwidget = None
         self.st_manager.blockSignals(True)
         self.canvas.prepareClose()
@@ -1047,16 +1053,30 @@ class MainWindow(mainwindow_cls):
         if page_key == self.imgtrans_proj.current_img:
             self.st_manager.updateTranslation()
 
-    def _prepare_imgtrans_run(self, start_from: str = None, reset_stats: bool = True):
-        """on_run_imgtrans 的前置工作，支援從指定頁開始"""
+    def _prepare_imgtrans_run(self, start_from: str = None, reset_stats: bool = True, only_pages: list = None):
+        """on_run_imgtrans 的前置工作，支援從指定頁開始或只跑指定頁清單"""
+        if only_pages:
+            all_keys = list(self.imgtrans_proj.pages.keys())
+            self._current_run_page_indices = {all_keys.index(p) for p in only_pages if p in all_keys}
+        else:
+            self._current_run_page_indices = None
+        start_run_log()
         self.backup_blkstyles.clear()
         if reset_stats:
             self.imgtrans_proj.page_ocr_stats.clear()
             folder = self.imgtrans_proj.directory
             if folder:
                 self._page_ocr_cache.pop(str(folder), None)
-            for i in range(self.pageList.count()):
-                self.pageList.item(i).setData(ROLE_PAGE_OCR, None)
+            if only_pages:
+                # 單頁模式：只清除該頁的 OCR 圖標
+                all_keys = list(self.imgtrans_proj.pages.keys())
+                for i in range(self.pageList.count()):
+                    item = self.pageList.item(i)
+                    if i < len(all_keys) and all_keys[i] in only_pages:
+                        item.setData(ROLE_PAGE_OCR, None)
+            else:
+                for i in range(self.pageList.count()):
+                    self.pageList.item(i).setData(ROLE_PAGE_OCR, None)
             self.pageList.viewport().update()
         if self.bottomBar.textblockChecker.isChecked():
             self.bottomBar.textblockChecker.click()
@@ -1065,7 +1085,9 @@ class MainWindow(mainwindow_cls):
         all_disabled = pcfg.module.all_stages_disabled()
         if pcfg.module.enable_detect:
             pages = list(self.imgtrans_proj.pages.keys())
-            if start_from and start_from in pages:
+            if only_pages:
+                run_pages = [p for p in only_pages if p in pages]
+            elif start_from and start_from in pages:
                 idx = pages.index(start_from)
                 run_pages = pages[idx:]
             else:
@@ -1074,7 +1096,9 @@ class MainWindow(mainwindow_cls):
                 self.imgtrans_proj.pages[page].clear()
         else:
             self.st_manager.updateTextBlkList()
-            for blklist in self.imgtrans_proj.pages.values():
+            target_pages = only_pages or list(self.imgtrans_proj.pages.keys())
+            for page_key in target_pages:
+                blklist = self.imgtrans_proj.pages.get(page_key, [])
                 ffmt_list = []
                 self.backup_blkstyles.append(ffmt_list)
                 for textblk in blklist:
@@ -1086,11 +1110,13 @@ class MainWindow(mainwindow_cls):
                     if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
                         textblk.rich_text = ''
                     textblk.vertical = textblk.src_is_vertical
-        self.module_manager.runImgtransPipeline(start_from=start_from, reset_stats=reset_stats)
+        self.module_manager.runImgtransPipeline(start_from=start_from, reset_stats=reset_stats, only_pages=only_pages)
 
     def on_imgtrans_pipeline_finished(self):
+        flush_run_log('finished')
         self.backup_blkstyles.clear()
         self._run_imgtrans_wo_textstyle_update = False
+        self._current_run_page_indices = None
         self.postprocess_mt_toggle = True
         if pcfg.module.empty_runcache and not shared.HEADLESS:
             self.module_manager.unload_all_models()
@@ -1138,6 +1164,9 @@ class MainWindow(mainwindow_cls):
                 blk.translation = blk.translation.upper()
 
     def on_pagtrans_finished(self, page_index: int):
+        if self._current_run_page_indices is not None and page_index not in self._current_run_page_indices:
+            LOGGER.info(f'[on_pagtrans_finished] 忽略殘留 signal page_index={page_index}（本次批次={self._current_run_page_indices}）')
+            return
         blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
         ffmt_list = None
         if len(self.backup_blkstyles) == self.imgtrans_proj.num_pages and len(self.backup_blkstyles[page_index]) == len(blk_list):
@@ -1256,6 +1285,10 @@ class MainWindow(mainwindow_cls):
 
     def _do_page_ocr_trans_done(self, imgname: str):
         if self.imgtrans_proj is None or imgname not in self.imgtrans_proj.pages:
+            return
+        page_index = self.imgtrans_proj.pagename2idx(imgname)
+        if self._current_run_page_indices is not None and page_index not in self._current_run_page_indices:
+            LOGGER.info(f'[ocr_trans_done] 忽略殘留 signal imgname={imgname!r}（本次批次={self._current_run_page_indices}）')
             return
         blk_list = self.imgtrans_proj.pages[imgname]
         if not blk_list:
@@ -1439,7 +1472,37 @@ class MainWindow(mainwindow_cls):
         self._run_imgtrans_wo_textstyle_update = False
         self._prepare_imgtrans_run()
 
+    # ── 排程執行 ────────────────────────────────────────────────
+    def on_schedule_btn_clicked(self):
+        """點擊排程按鈕：若已有排程則顯示現有對話框，否則建立新的。"""
+        if self._schedule_dialog is None:
+            self._schedule_dialog = ScheduleDialog(self)
+            self._schedule_dialog.schedule_triggered.connect(self._on_schedule_fire)
+            self._schedule_dialog.schedule_cancelled.connect(self._on_schedule_cancelled)
+            self._schedule_dialog.finished.connect(self._on_schedule_dialog_closed)
+        self._schedule_dialog.show()
+        self._schedule_dialog.raise_()
+        self._schedule_dialog.activateWindow()
+
+    def _on_schedule_fire(self):
+        """排程時間到，自動執行 RUN。"""
+        self.leftBar.set_schedule_active(False)
+        LOGGER.info('排程執行觸發，開始 RUN')
+        self.on_run_imgtrans()
+
+    def _on_schedule_cancelled(self):
+        """使用者在對話框中取消排程。"""
+        self.leftBar.set_schedule_active(False)
+
+    def _on_schedule_dialog_closed(self):
+        """對話框關閉時，依排程狀態更新按鈕圖示。"""
+        if self._schedule_dialog is not None:
+            active = self._schedule_dialog.is_running()
+            self.leftBar.set_schedule_active(active)
+
     def on_stop_imgtrans(self):
+        self._current_run_page_indices = None
+        flush_run_log('stopped')
         if self._gui_batch_running:
             LOGGER.info('使用者手動中止了批量翻譯佇列')
             self._gui_batch_running = False
@@ -1457,6 +1520,12 @@ class MainWindow(mainwindow_cls):
         if not current:
             return
         self._prepare_imgtrans_run(start_from=current)
+
+    def on_run_current_page(self):
+        current = self.imgtrans_proj.current_img
+        if not current:
+            return
+        self._prepare_imgtrans_run(only_pages=[current])
 
     def on_measure_font_ratio(self):
         """量測當前頁所有文字框的字型佔比，每框都輸出 log（不修改任何值）"""

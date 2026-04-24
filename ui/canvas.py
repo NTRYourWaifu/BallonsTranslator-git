@@ -758,47 +758,21 @@ class Canvas(QGraphicsScene):
     def on_create_contextmenu(self, pos: QPoint, is_textpanel: bool):
         if self.textEditMode() and not self.creating_textblock:
             menu = QMenu(self.gv)
-            copy_act = menu.addAction(self.tr("Copy"))
-            copy_act.setShortcut(QKeySequence.StandardKey.Copy)
-            paste_act = menu.addAction(self.tr("Paste"))
-            paste_act.setShortcut(QKeySequence.StandardKey.Paste)
-            delete_act = menu.addAction(self.tr("Delete"))
-            delete_act.setShortcut(QKeySequence("Ctrl+D"))
-            copy_src_act = menu.addAction(self.tr("Copy source text"))
-            copy_src_act.setShortcut(QKeySequence("Ctrl+Shift+C"))
-            paste_src_act = menu.addAction(self.tr("Paste source text"))
-            paste_src_act.setShortcut(QKeySequence("Ctrl+Shift+V"))
-            delete_recover_act = menu.addAction(self.tr("Delete and Recover removed text"))
-            delete_recover_act.setShortcut(QKeySequence("Ctrl+Shift+D"))
-
-            menu.addSeparator()
 
             format_act = menu.addAction(self.tr("Apply font formatting"))
             layout_act = menu.addAction(self.tr("Auto layout"))
             angle_act = menu.addAction(self.tr("Reset Angle"))
             squeeze_act = menu.addAction(self.tr("Squeeze"))
+
             menu.addSeparator()
-            translate_act = menu.addAction(self.tr("translate"))
+
+            ocr_inpaint_act = menu.addAction(self.tr("OCR並抹字"))
             ocr_act = menu.addAction(self.tr("OCR"))
-            ocr_translate_act = menu.addAction(self.tr("OCR and translate"))
-            ocr_translate_inpaint_act = menu.addAction(self.tr("OCR, translate and inpaint"))
-            inpaint_act = menu.addAction(self.tr("inpaint"))
+            inpaint_act = menu.addAction(self.tr("抹字"))
 
             rst = menu.exec(pos)
-            
-            if rst == delete_act:
-                self.delete_textblks.emit(0)
-            elif rst == delete_recover_act:
-                self.delete_textblks.emit(1)
-            elif rst == copy_act:
-                self.on_copy(pos.toPointF())
-            elif rst == paste_act:
-                self.on_paste(pos.toPointF())
-            elif rst == copy_src_act:
-                self.copy_src_signal.emit()
-            elif rst == paste_src_act:
-                self.paste_src_signal.emit()
-            elif rst == format_act:
+
+            if rst == format_act:
                 self.format_textblks.emit()
             elif rst == layout_act:
                 self.layout_textblks.emit()
@@ -806,14 +780,10 @@ class Canvas(QGraphicsScene):
                 self.reset_angle.emit()
             elif rst == squeeze_act:
                 self.squeeze_blk.emit()
-            elif rst == translate_act:
-                self.run_blktrans.emit(-1)
+            elif rst == ocr_inpaint_act:
+                self.run_blktrans.emit(4)
             elif rst == ocr_act:
                 self.run_blktrans.emit(0)
-            elif rst == ocr_translate_act:
-                self.run_blktrans.emit(1)
-            elif rst == ocr_translate_inpaint_act:
-                self.run_blktrans.emit(2)
             elif rst == inpaint_act:
                 self.run_blktrans.emit(3)
 

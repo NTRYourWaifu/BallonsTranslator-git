@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from natsort import natsorted
 
-IMG_EXT = ['.bmp', '.jpg', '.png', '.jpeg', '.webp']
+IMG_EXT = ['.bmp', '.jpg', '.png', '.jpeg', '.webp', '.avif']
 NP_BOOL_TYPES = (np.bool_, np.bool8)
 NP_FLOAT_TYPES = (np.float_, np.float16, np.float32, np.float64)
 NP_INT_TYPES = (np.int_, np.int8, np.int16, np.int32, np.int64, np.uint, np.uint8, np.uint16, np.uint32, np.uint64)

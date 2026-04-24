@@ -290,6 +290,7 @@ class ImgtransThread(QThread):
         self._pause_event.set()   # set = 不暫停，clear = 暫停
         self._stop_flag = False
         self.start_from_imgname: str = None   # None = 從頭跑
+        self.only_run_pages: list = None       # 非 None 時只跑這些頁
         self.last_stopped_imgname: str = None  # 記錄上次停在哪
         self.page_start_offset: int = 0
         self._ocr_counter_lock = threading.Lock()
@@ -322,17 +323,27 @@ class ImgtransThread(QThread):
         self.start()
 
     def _blktrans_pipeline(self, blk_list: List[TextBlock], tgt_img: np.ndarray, mode: int, blk_ids: List[int], tgt_mask):
-        if mode >= 0 and mode < 3:
+        # mode 0: OCR only
+        # mode 1: OCR + translate
+        # mode 2: OCR + translate + inpaint
+        # mode 3: inpaint only
+        # mode 4: OCR + inpaint (no translate)
+        do_ocr = mode in (0, 1, 2, 4)
+        do_translate = mode in (1, 2)
+        do_inpaint = mode in (2, 3, 4)
+
+        if do_ocr:
             try:
                 self.ocr_thread.module.run_ocr(tgt_img, blk_list, split_textblk=True, force_slice=True)
             except Exception as e:
                 create_error_dialog(e, self.tr('OCR Failed.'), 'OCRFailed')
             self.finish_blktrans.emit(mode, blk_ids)
 
-        if mode != 0 and mode < 3:
+        if do_translate:
             self.translate_thread.module.translate_textblk_lst(blk_list)
             self.finish_blktrans.emit(mode, blk_ids)
-        if mode > 1:
+
+        if do_inpaint:
             im_h, im_w = tgt_img.shape[:2]
             progress_prod = 100. / len(blk_list) if len(blk_list) > 0 else 0
             for ii, blk in enumerate(blk_list):
@@ -358,7 +369,13 @@ class ImgtransThread(QThread):
         self.inpaint_counter = 0
 
         all_pages = list(self.imgtrans_proj.pages.keys())
-        if self.start_from_imgname and self.start_from_imgname in all_pages:
+        if self.only_run_pages is not None:
+            only = [p for p in self.only_run_pages if p in all_pages]
+            start_idx = all_pages.index(only[0]) if only else 0
+            pages_to_run = only
+            self.only_run_pages = None
+            self.start_from_imgname = None
+        elif self.start_from_imgname and self.start_from_imgname in all_pages:
             start_idx = all_pages.index(self.start_from_imgname)
             pages_to_run = all_pages[start_idx:]
             self.start_from_imgname = None
@@ -825,7 +842,7 @@ class ModuleManager(QObject):
         self.check_inpaint_fin_timer.stop()
         self.inpaint_th_finished.emit()
 
-    def runImgtransPipeline(self, start_from: str = None, reset_stats: bool = True):
+    def runImgtransPipeline(self, start_from: str = None, reset_stats: bool = True, only_pages: list = None):
         if self.imgtrans_proj.is_empty:
             LOGGER.info('proj file is empty, nothing to do')
             self.progress_msgbox.hide()
@@ -847,7 +864,8 @@ class ModuleManager(QObject):
         self.progress_msgbox.inpaint_bar.setVisible(cfg_module.enable_inpaint)
         self.progress_msgbox.zero_progress()
         self.progress_msgbox.show()
-        self.imgtrans_thread.start_from_imgname = start_from
+        self.imgtrans_thread.only_run_pages = only_pages
+        self.imgtrans_thread.start_from_imgname = start_from if only_pages is None else None
         self.imgtrans_thread.runImgtransPipeline(self.imgtrans_proj)
 
     def pauseImgtransPipeline(self):

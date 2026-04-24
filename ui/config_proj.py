@@ -298,7 +298,7 @@ class ProjImgTrans:
     def get_result_path(self, imgname: str) -> str:
         ext = '.png'
         if pcfg is not None:
-            if pcfg.imgsave_ext not in {'.jpg', '.png', '.webp'}:
+            if pcfg.imgsave_ext not in {'.jpg', '.png', '.webp', '.avif'}:
                 LOGGER.warning('invalid image saving ext in config.json')
             else:
                 ext = pcfg.imgsave_ext

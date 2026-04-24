@@ -57,6 +57,14 @@ _SVG_RESTART = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
   <polygon points="3,7 8,12 3,17" fill="#cccccc"/>
 </svg>'''
 
+_SVG_RUN_PAGE = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <rect x="3" y="2" width="13" height="17" rx="1.5" fill="none" stroke="#cccccc" stroke-width="1.8"/>
+  <line x1="6" y1="7" x2="13" y2="7" stroke="#cccccc" stroke-width="1.4"/>
+  <line x1="6" y1="10" x2="13" y2="10" stroke="#cccccc" stroke-width="1.4"/>
+  <line x1="6" y1="13" x2="10" y2="13" stroke="#cccccc" stroke-width="1.4"/>
+  <polygon points="15,15 22,19 15,23" fill="#88cc88"/>
+</svg>'''
+
 _SVG_MEASURE_FONT = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
   <rect x="3" y="13" width="18" height="2" fill="#cccccc"/>
   <rect x="3" y="5" width="2" height="6" fill="#cccccc"/>
@@ -75,6 +83,22 @@ _SVG_EXPORT_ALL = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
   <rect x="7" y="9" width="12" height="9" rx="1.2" fill="#333" stroke="#cccccc" stroke-width="1.6"/>
   <polyline points="10,17 13,20 16,17" stroke="#88cc88" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
   <line x1="13" y1="13" x2="13" y2="20" stroke="#88cc88" stroke-width="2" stroke-linecap="round"/>
+</svg>'''
+
+# 時鐘排程按鈕：圓形時鐘，帶一個小三角形的播放符號
+_SVG_SCHEDULE = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="12" cy="12" r="9" fill="none" stroke="#cccccc" stroke-width="1.8"/>
+  <line x1="12" y1="7" x2="12" y2="12" stroke="#cccccc" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="12" y1="12" x2="15" y2="14" stroke="#cccccc" stroke-width="1.8" stroke-linecap="round"/>
+  <polygon points="9,18 14,21 9,24" fill="#88cc88" transform="translate(5,-4) scale(0.7)"/>
+</svg>'''
+
+# 排程進行中：時鐘 + 橘色圓點
+_SVG_SCHEDULE_ACTIVE = '''<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="12" cy="12" r="9" fill="none" stroke="#cccccc" stroke-width="1.8"/>
+  <line x1="12" y1="7" x2="12" y2="12" stroke="#cccccc" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="12" y1="12" x2="15" y2="14" stroke="#cccccc" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="19" cy="5" r="4" fill="#e08030"/>
 </svg>'''
 
 
@@ -187,6 +211,7 @@ class LeftBar(Widget):
     save_proj = Signal()
     save_config = Signal()
     export_all_pages = Signal()
+    run_current_page = Signal()
     def __init__(self, mainwindow, *args, **kwargs) -> None:
         super().__init__(mainwindow, *args, **kwargs)
         self.mainwindow: QMainWindow = mainwindow
@@ -268,6 +293,12 @@ class LeftBar(Widget):
         self.run_imgtrans = self.runImgtransBtn.clicked
         self.runImgtransBtn.setFixedSize(LEFTBTN_WIDTH, LEFTBTN_WIDTH)
 
+        self.scheduleBtn = QPushButton()
+        self.scheduleBtn.setFixedSize(LEFTBTN_WIDTH, LEFTBTN_WIDTH)
+        self.scheduleBtn.setIcon(_svg_icon(_SVG_SCHEDULE, LEFTBTN_WIDTH))
+        self.scheduleBtn.setIconSize(self.scheduleBtn.size())
+        self.scheduleBtn.setToolTip(self.tr('排程執行'))
+
         btn_size = LEFTBTN_WIDTH
         self.stopBtn = QPushButton()
         self.stopBtn.setFixedSize(btn_size, btn_size)
@@ -280,6 +311,13 @@ class LeftBar(Widget):
         self.resumeHereBtn.setIcon(_svg_icon(_SVG_RESUME_HERE, btn_size))
         self.resumeHereBtn.setIconSize(self.resumeHereBtn.size())
         self.resumeHereBtn.setToolTip(self.tr('從當前頁繼續'))
+
+        self.runPageBtn = QPushButton()
+        self.runPageBtn.setFixedSize(btn_size, btn_size)
+        self.runPageBtn.setIcon(_svg_icon(_SVG_RUN_PAGE, btn_size))
+        self.runPageBtn.setIconSize(self.runPageBtn.size())
+        self.runPageBtn.setToolTip(self.tr('執行當前頁'))
+        self.runPageBtn.clicked.connect(self.run_current_page)
 
         self.measureFontBtn = QPushButton()
         self.measureFontBtn.setFixedSize(btn_size, btn_size)
@@ -309,10 +347,12 @@ class LeftBar(Widget):
         vlayout.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
         vlayout.addWidget(self.stopBtn)
         vlayout.addWidget(self.resumeHereBtn)
+        vlayout.addWidget(self.runPageBtn)
         vlayout.addWidget(self.measureFontBtn)
         vlayout.addWidget(self.applyFontScaleBtn)
         vlayout.addWidget(self.exportAllBtn)
         vlayout.addWidget(self.configChecker)
+        vlayout.addWidget(self.scheduleBtn)
         vlayout.addWidget(self.runImgtransBtn)
         vlayout.setContentsMargins(padding, 0, padding, int(LEFTBTN_WIDTH / 2))
         vlayout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -420,6 +460,13 @@ class LeftBar(Widget):
 
     def needleftStackWidget(self) -> bool:
         return self.showPageListLabel.isChecked() or self.globalSearchChecker.isChecked() or self.batchQueueChecker.isChecked()
+
+    def set_schedule_active(self, active: bool):
+        """排程進行中時切換為橘色圓點圖示，否則還原。"""
+        svg = _SVG_SCHEDULE_ACTIVE if active else _SVG_SCHEDULE
+        self.scheduleBtn.setIcon(_svg_icon(svg, LEFTBTN_WIDTH))
+        tip = self.tr('排程執行中（點擊可查看/取消）') if active else self.tr('排程執行')
+        self.scheduleBtn.setToolTip(tip)
 
 
 class TitleBar(Widget):
