@@ -2,7 +2,7 @@ import numpy as np
 from typing import List, Union
 import os
 
-from qtpy.QtWidgets import QSlider, QMenu, QGraphicsScene, QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand
+from qtpy.QtWidgets import QSlider, QMenu, QGraphicsScene, QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand, QApplication
 from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSizeF, QEvent
 from qtpy.QtGui import QKeySequence, QPixmap, QImage, QHideEvent, QKeyEvent, QWheelEvent, QResizeEvent, QPainter, QPen, QPainterPath, QCursor, QNativeGestureEvent
 
@@ -18,6 +18,7 @@ from .texteditshapecontrol import TextBlkShapeControl
 from .custom_widget import ScrollBar, FadeLabel
 from .image_edit import ImageEditMode, DrawingLayer, StrokeImgItem
 from .page_search_widget import PageSearchWidget
+from .mini_font_bar import MiniFontBar
 from utils import shared as C
 from utils.config import pcfg
 
@@ -201,6 +202,7 @@ class Canvas(QGraphicsScene):
         self.text_transparency = 0
         self.textblock_mode = False
         self.creating_textblock = False
+        self.pending_create_textblock = False  # 右鍵選單「新增對話框」觸發後等待用戶按下
         self.create_block_origin: QPointF = None
         self.editing_textblkitem: TextBlkItem = None
 
@@ -225,6 +227,7 @@ class Canvas(QGraphicsScene):
 
         self.search_widget = PageSearchWidget(self.gv)
         self.search_widget.hide()
+        self.mini_font_bar: MiniFontBar = None  # 由外部呼叫 setup_mini_font_bar 初始化
         
         self.ctrl_relesed = self.gv.ctrl_released
         self.vscroll_bar = self.gv.verticalScrollBar()
@@ -486,6 +489,14 @@ class Canvas(QGraphicsScene):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
 
+        if key == QKEY.Key_Escape:
+            if self.mini_font_bar is not None and self.mini_font_bar.isVisible():
+                self.mini_font_bar.hide()
+            if self.pending_create_textblock:
+                self.pending_create_textblock = False
+                QApplication.restoreOverrideCursor()
+                return
+
         if key == QKEY.Key_Alt:
             self.alt_pressed = True
 
@@ -631,9 +642,24 @@ class Canvas(QGraphicsScene):
             self.mid_btn_pressed = True
             self.pan_initial_pos = event.screenPos()
             return
-        
+
+        # 任何點擊都隱藏 mini font bar（右鍵點擊會重新觸發 on_create_contextmenu 來 show）
+        if self.mini_font_bar is not None and self.mini_font_bar.isVisible():
+            if btn != Qt.MouseButton.RightButton:
+                self.mini_font_bar.hide()
+
         if self.imgtrans_proj.img_valid:
-            if self.textblock_mode and len(self.selectedItems()) == 0 and self.textEditMode():
+            if self.pending_create_textblock and self.textEditMode():
+                if btn == Qt.MouseButton.LeftButton:
+                    self.pending_create_textblock = False
+                    QApplication.restoreOverrideCursor()
+                    self.startCreateTextblock(event.scenePos())
+                    return super().mousePressEvent(event)
+                elif btn == Qt.MouseButton.RightButton:
+                    self.pending_create_textblock = False
+                    QApplication.restoreOverrideCursor()
+                    return
+            elif self.textblock_mode and len(self.selectedItems()) == 0 and self.textEditMode():
                 if btn == Qt.MouseButton.RightButton:
                     return self.startCreateTextblock(event.scenePos())
             elif self.creating_normal_rect:
@@ -755,14 +781,27 @@ class Canvas(QGraphicsScene):
     def setTextBlockMode(self, mode: bool):
         self.textblock_mode = mode
 
+    def setup_mini_font_bar(self, font_format_panel):
+        self.mini_font_bar = MiniFontBar(self.gv, font_format_panel)
+
     def on_create_contextmenu(self, pos: QPoint, is_textpanel: bool):
         if self.textEditMode() and not self.creating_textblock:
+            # 顯示 mini font bar 在游標上方（選單關閉後繼續留著，讓用戶直接調整格式）
+            if self.mini_font_bar is not None:
+                sel = self.selected_text_items()
+                blkitem = sel[0] if sel else None
+                self.mini_font_bar.show_at(pos, blkitem)
+
             menu = QMenu(self.gv)
+
+            new_blk_act = menu.addAction(self.tr("新增對話框"))
+
+            menu.addSeparator()
 
             format_act = menu.addAction(self.tr("Apply font formatting"))
             layout_act = menu.addAction(self.tr("Auto layout"))
             angle_act = menu.addAction(self.tr("Reset Angle"))
-            squeeze_act = menu.addAction(self.tr("Squeeze"))
+            squeeze_act = menu.addAction(self.tr("貼合文字"))
 
             menu.addSeparator()
 
@@ -771,8 +810,12 @@ class Canvas(QGraphicsScene):
             inpaint_act = menu.addAction(self.tr("抹字"))
 
             rst = menu.exec(pos)
+            # mini_font_bar 繼續保留顯示，直到用戶點別處（mousePressEvent 會 hide）
 
-            if rst == format_act:
+            if rst == new_blk_act:
+                self.pending_create_textblock = True
+                QApplication.setOverrideCursor(Qt.CursorShape.CrossCursor)
+            elif rst == format_act:
                 self.format_textblks.emit()
             elif rst == layout_act:
                 self.layout_textblks.emit()
@@ -825,6 +868,9 @@ class Canvas(QGraphicsScene):
         self.alt_pressed = False
         self.scale_tool_mode = False
         self.creating_textblock = False
+        if self.pending_create_textblock:
+            QApplication.restoreOverrideCursor()
+        self.pending_create_textblock = False
         self.create_block_origin = None
         self.editing_textblkitem = None
         self.gv.ctrl_pressed = False

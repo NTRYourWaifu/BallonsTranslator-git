@@ -297,6 +297,7 @@ class MainWindow(mainwindow_cls):
         self.mtSubWidget.hide()
 
         SW.st_manager = self.st_manager = SceneTextManager(self.app, self, self.canvas, self.textPanel)
+        self.canvas.setup_mini_font_bar(self.st_manager.formatpanel)
         self.st_manager.new_textblk.connect(self.canvas.search_widget.on_new_textblk)
         self.canvas.search_widget.pairwidget_list = self.st_manager.pairwidget_list
         self.canvas.search_widget.textblk_item_list = self.st_manager.textblk_item_list
