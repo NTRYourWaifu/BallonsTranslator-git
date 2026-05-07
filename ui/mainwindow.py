@@ -238,6 +238,7 @@ class MainWindow(mainwindow_cls):
 
         self.batchQueuePanel = BatchQueuePanel(self.leftStackWidget)
         self.batchQueuePanel.run_batch.connect(self.on_run_batch_gui)
+        self.batchQueuePanel.save_batch.connect(self.on_save_batch)
         self.batchQueuePanel.open_folder.connect(self.openDir)
         self.batchQueuePanel.folder_added.connect(self._on_batch_folder_added)
         self.leftStackWidget.addWidget(self.batchQueuePanel)
@@ -1710,6 +1711,28 @@ class MainWindow(mainwindow_cls):
             self.module_manager.ocr_stats_bar.reset()
         LOGGER.info(f'開始 GUI 批量翻譯，共 {len(valid_dirs)} 個資料夾')
         self._run_next_gui_batch()
+
+    def on_save_batch(self, dirs: list):
+        """批量轉檔：對佇列中每個資料夾重新存出 result 圖片，不重新翻譯"""
+        valid_dirs = [d for d in dirs if osp.exists(d)]
+        if not valid_dirs:
+            LOGGER.warning('批量佇列中沒有有效的資料夾')
+            return
+        LOGGER.info(f'開始批量轉檔，共 {len(valid_dirs)} 個資料夾，格式：{pcfg.imgsave_ext}')
+        prev_row = self.pageList.currentIndex().row()
+        prev_save_on_change = self.save_on_page_changed
+        self.save_on_page_changed = False
+        try:
+            for d in valid_dirs:
+                self.openDir(d)
+                pages = list(self.imgtrans_proj.pages.keys())
+                LOGGER.info(f'轉檔：{d}（{len(pages)} 頁）')
+                for i in range(len(pages)):
+                    self.pageList.setCurrentRow(i)
+                    self.saveCurrentPage(False, False)
+        finally:
+            self.save_on_page_changed = prev_save_on_change
+        LOGGER.info('批量轉檔完成')
 
     def _run_next_gui_batch(self):
         """依序處理 GUI 批量佇列中的下一個資料夾"""

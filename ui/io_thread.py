@@ -1,5 +1,8 @@
 import numpy as np
+import os
 import os.path as osp
+import subprocess
+import tempfile
 import traceback
 
 from qtpy.QtCore import Qt, Signal, QUrl, QThread
@@ -7,22 +10,48 @@ from qtpy.QtGui import QImage, QPixmap
 from qtpy.QtWidgets import QDialog, QMessageBox, QFileDialog
 from PIL import Image as PILImage
 
-try:
-    from pillow_heif import register_heif_opener
-    register_heif_opener()
-    _AVIF_SUPPORTED = True
-except ImportError:
-    try:
-        import pillow_avif  # registers AVIF handler into PIL.Image.SAVE
-        _AVIF_SUPPORTED = True
-    except ImportError:
-        _AVIF_SUPPORTED = False
-
 from utils.logger import logger as LOGGER
 from utils.io_utils import imread, imwrite
 from utils import create_error_dialog
 from .config_proj import ProjImgTrans
 from .custom_widget import ProgressMessageBox
+
+# SVT-AV1 via FFmpeg Full Build
+_FFMPEG_SVTAV1 = r'H:\Download\Toolpackage\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe'
+_AVIF_PRESET = 8        # 平衡
+_AVIF_MAX_DIM = 4096    # Android 硬體 AV1 decoder 上限（Samsung Helio G99）
+_SCALE_FILTER = (
+    f"scale='min({_AVIF_MAX_DIM},iw)':'min({_AVIF_MAX_DIM},ih)'"
+    f":force_original_aspect_ratio=decrease"
+    f",scale=trunc(iw/2)*2:trunc(ih/2)*2"
+)
+
+
+def _save_avif_svtav1(pil_img: PILImage.Image, dst: str, quality: int):
+    crf = int((100 - quality) * 0.6 + 10)
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tf:
+        tmp_path = tf.name
+    try:
+        pil_img.save(tmp_path, format='PNG')
+        cmd = [
+            _FFMPEG_SVTAV1, '-y', '-i', tmp_path,
+            '-vf', _SCALE_FILTER,
+            '-c:v', 'libsvtav1',
+            '-pix_fmt', 'yuv420p',
+            '-crf', str(crf),
+            '-preset', str(_AVIF_PRESET),
+            '-svtav1-params', 'lad=0:scd=0',
+            dst,
+        ]
+        result = subprocess.run(cmd, capture_output=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        if result.returncode != 0:
+            raise RuntimeError(f'ffmpeg svtav1 failed: {result.stderr.decode(errors="replace")[-300:]}')
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 class ThreadBase(QThread):
@@ -75,7 +104,7 @@ class ImgSaveThread(ThreadBase):
                     ptr = qimg.bits()
                     ptr.setsize(qimg.bytesPerLine() * qimg.height())
                     pil_img = PILImage.frombytes('RGB', (qimg.width(), qimg.height()), bytes(ptr), 'raw', 'RGB', qimg.bytesPerLine())
-                    pil_img.save(save_path, format='AVIF', quality=save_params['quality'])
+                    _save_avif_svtav1(pil_img, save_path, save_params['quality'])
                 elif ext in {'.jpg', '.webp'}:
                     img.save(save_path, quality=save_params['quality'])
                 else:

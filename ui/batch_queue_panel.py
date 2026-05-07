@@ -352,6 +352,7 @@ class FolderListWidget(QListWidget):
 class BatchQueuePanel(Widget):
 
     run_batch = Signal(list)
+    save_batch = Signal(list)
     queue_changed = Signal(int)
     open_folder = Signal(str)    # 點擊項目時切換到該資料夾
     folder_added = Signal(str)   # 新資料夾加入佇列（供 mainwindow 回填歷史統計）
@@ -424,6 +425,19 @@ class BatchQueuePanel(Widget):
         """)
         self.runAllBtn.clicked.connect(self.onRunAll)
 
+        self.saveAllBtn = QPushButton(self.tr('💾  批量轉檔'))
+        self.saveAllBtn.setStyleSheet('''
+            QPushButton {
+                background-color: #1565c0; color: white;
+                font-weight: bold; font-size: 13px; padding: 8px;
+                border-radius: 5px; border: none;
+            }
+            QPushButton:hover { background-color: #1976d2; }
+            QPushButton:disabled { background-color: #444; color: #777; }
+        ''')
+        self.saveAllBtn.setToolTip(self.tr('將佇列中所有資料夾的 result 圖片重新存成目前選定的格式（不重新翻譯）'))
+        self.saveAllBtn.clicked.connect(self.onSaveAll)
+
         self.countLabel = QLabel()
         self.countLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.countLabel.setStyleSheet('color: #888; font-size: 11px;')
@@ -444,7 +458,11 @@ class BatchQueuePanel(Widget):
         layout.addWidget(legend)
         layout.addWidget(self.countLabel)
         layout.addLayout(btnRow)
-        layout.addWidget(self.runAllBtn)
+        runRow = QHBoxLayout()
+        runRow.setSpacing(6)
+        runRow.addWidget(self.runAllBtn)
+        runRow.addWidget(self.saveAllBtn)
+        layout.addLayout(runRow)
 
     # ── 公開方法 ──
 
@@ -519,6 +537,7 @@ class BatchQueuePanel(Widget):
         self.removeBtn.setEnabled(not running)
         self.clearBtn.setEnabled(not running)
         self.runAllBtn.setEnabled(not running)
+        self.saveAllBtn.setEnabled(not running)
         # 執行中禁止拖動排序
         self.folderList.setDragEnabled(not running)
         self.runAllBtn.setText(
@@ -567,3 +586,8 @@ class BatchQueuePanel(Widget):
                 self.folderList.item(i).setData(ROLE_OCR_STATS, {})
             self.folderList.viewport().update()
             self.run_batch.emit(dirs)
+
+    def onSaveAll(self):
+        dirs = self._getAllPaths()
+        if dirs:
+            self.save_batch.emit(dirs)
