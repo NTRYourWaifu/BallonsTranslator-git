@@ -113,6 +113,12 @@ class RunBlkTransCommand(QUndoCommand):
                     blkitem.blk.rich_text = ''
                 if do_ocr:
                     transpairw.e_source.setPlainTextAndKeepUndoStack(blkitem.blk.get_text())
+                    # LLM OCR 引擎在 OCR 階段就把譯文塞進 blk.translation，順手寫到譯文欄
+                    if not do_translate and blkitem.blk.translation:
+                        transpairw.e_trans.setPlainTextAndKeepUndoStack(blkitem.blk.translation)
+                        blkitem.setPlainTextAndKeepUndoStack(blkitem.blk.translation)
+                        self.has_trans.add(id(blkitem))
+                        blkitem.blk.rich_text = ''
                     blkitem.setVertical(blkitem.blk.vertical)
                     from ui.textitem import calc_font_size_by_render
                     blkitem.blk.font_size = calc_font_size_by_render(blkitem.blk)

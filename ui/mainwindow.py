@@ -1108,7 +1108,7 @@ class MainWindow(mainwindow_cls):
                         ffmt_list.append(textblk.fontformat.deepcopy())
                     if pcfg.module.enable_ocr:
                         textblk.text = []
-                        textblk.set_font_colors((0, 0, 0), (0, 0, 0))
+                        textblk.set_font_colors(bg_colors=(0, 0, 0))
                     if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
                         textblk.rich_text = ''
                     textblk.vertical = textblk.src_is_vertical
@@ -1300,19 +1300,26 @@ class MainWindow(mainwindow_cls):
         if override_fnt_size:
             return  # 使用者強制覆蓋字型大小，不需要 render 計算
 
-        # 補做 stroke_width / stroke_color 設定（on_pagtrans_finished 可能還沒跑）
+        # 補做顏色 + stroke 設定（on_pagtrans_finished 可能還沒跑，或顏色被 _prepare_imgtrans_run 清掉）
+        override_fnt_color = pcfg.let_fntcolor_flag == 1
         override_fnt_stroke = pcfg.let_fntstroke_flag == 1
         override_fnt_scolor = pcfg.let_fnt_scolor_flag == 1
         gf = self.textPanel.formatpanel.global_format
         for blk in blk_list:
-            if override_fnt_stroke:
-                blk.stroke_width = gf.stroke_width
-            elif blk.fontformat.stroke_width == 0:
-                blk.recalulate_stroke_width()
+            # 先還原顏色（必須在 recalulate_stroke_width 之前，stroke 依賴正確的 fg/bg 色）
+            if override_fnt_color:
+                blk.set_font_colors(fg_colors=gf.frgb)
+            elif blk.fontformat.frgb == [0, 0, 0]:
+                blk.set_font_colors(fg_colors=gf.frgb)
             if override_fnt_scolor:
                 blk.set_font_colors(bg_colors=gf.srgb)
             elif blk.fontformat.srgb == [0, 0, 0]:
                 blk.set_font_colors(bg_colors=gf.srgb)
+            # 顏色正確後再計算 stroke
+            if override_fnt_stroke:
+                blk.stroke_width = gf.stroke_width
+            elif blk.fontformat.stroke_width == 0:
+                blk.recalulate_stroke_width()
 
         _batch_current = self._gui_batch_current if self._gui_batch_running else None
 

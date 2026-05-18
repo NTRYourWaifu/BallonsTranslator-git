@@ -477,7 +477,8 @@ class ImgtransThread(QThread):
                 for imgname in pages_to_run:
                     if self._stop_flag:
                         break
-                    self._do_ocr_page(imgname)
+                    ocr_count = self._do_ocr_page(imgname)
+                    self.update_ocr_progress.emit(ocr_count)
             if cfg_module.enable_translate:
                 unload_modules(self, ['ocr'])
                 for imgname in pages_to_run:
@@ -509,8 +510,9 @@ class ImgtransThread(QThread):
             if self._stop_flag:
                 break
 
-            self._do_ocr_page(imgname)
+            ocr_count = self._do_ocr_page(imgname)
 
+            translate_count = None
             if cfg_module.enable_translate and not self._stop_flag:
                 blk_list = self.imgtrans_proj.pages.get(imgname, [])
                 try:
@@ -519,17 +521,22 @@ class ImgtransThread(QThread):
                     create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
                 with self._translate_counter_lock:
                     self.translate_counter += 1
-                    local_count = self.translate_counter
-                self.update_translate_progress.emit(local_count)
+                    translate_count = self.translate_counter
 
-            # OCR（+翻譯）都完成後，用 imgname 通知主執行緒做字體計算
+            # page_ocr_trans_done 必須先於進度更新 emit：
+            # 若進度更新先到主執行緒，可能觸發 finishImgtransPipeline → 切換下一本書，
+            # 導致最後一頁的 page_ocr_trans_done 被 early return 掉（字型/顏色未處理）
             if not self._stop_flag and cfg_module.enable_ocr:
                 self.page_ocr_trans_done.emit(imgname)
 
-    def _do_ocr_page(self, imgname):
-        """單頁 OCR + restore_ocr_empty 處理。"""
+            self.update_ocr_progress.emit(ocr_count)
+            if translate_count is not None:
+                self.update_translate_progress.emit(translate_count)
+
+    def _do_ocr_page(self, imgname) -> int:
+        """單頁 OCR + restore_ocr_empty 處理。回傳更新後的 ocr_counter，由呼叫方決定何時 emit 進度。"""
         if not cfg_module.enable_ocr:
-            return
+            return 0
 
         img = self.imgtrans_proj.read_img(imgname)
         blk_list = self.imgtrans_proj.pages.get(imgname, [])
@@ -567,7 +574,7 @@ class ImgtransThread(QThread):
         with self._ocr_counter_lock:
             self.ocr_counter += 1
             local_count = self.ocr_counter
-        self.update_ocr_progress.emit(local_count)
+        return local_count
 
     def detect_finished(self) -> bool:
         if self.imgtrans_proj is None:

@@ -186,6 +186,7 @@ class Canvas(QGraphicsScene):
     # weird sometimes qt can't catch altmodifier: arow keys+alt
     alt_pressed = False
     scale_tool_mode = False
+    RB_DRAG_THRESHOLD = 8  # scene pixels，區分右鍵點擊 vs 拖曳的距離門檻
 
     projstate_unsaved = False
     proj_savestate_changed = Signal(bool)
@@ -205,6 +206,8 @@ class Canvas(QGraphicsScene):
         self.pending_create_textblock = False  # 右鍵選單「新增對話框」觸發後等待用戶按下
         self.create_block_origin: QPointF = None
         self.editing_textblkitem: TextBlkItem = None
+        self.rb_drag_start: QPointF = None   # 右鍵按下時的 scenePos，用於偵測拖曳
+        self.rb_drag_pending: bool = False   # 等待確認是右鍵點擊還是拖曳
 
         self.gv = CustomGV(self)
         self.gv.scale_down_signal.connect(self.scaleDown)
@@ -595,6 +598,15 @@ class Canvas(QGraphicsScene):
         elif self.scale_tool_mode:
             self.scale_tool.emit(event.scenePos())
         
+        elif self.rb_drag_pending:
+            if (event.scenePos() - self.rb_drag_start).manhattanLength() > self.RB_DRAG_THRESHOLD:
+                self.rb_drag_pending = False
+                self.startCreateTextblock(self.rb_drag_start)
+                # 立即更新 rect 到目前游標位置，避免下一幀才更新
+                self.txtblkShapeControl.setRect(
+                    QRectF(self.create_block_origin, event.scenePos() / self.scale_factor).normalized()
+                )
+
         elif self.rubber_band.isVisible() and self.rubber_band_origin is not None:
             self.rubber_band.setGeometry(QRectF(self.rubber_band_origin, event.scenePos()).normalized())
             sel_path = QPainterPath(self.rubber_band_origin)
@@ -673,17 +685,25 @@ class Canvas(QGraphicsScene):
                     self.begin_scale_tool.emit(event.scenePos())
                 elif self.painting:
                     self.addStrokeImageItem(self.inpaintLayer.mapFromScene(event.scenePos()), self.painting_pen)
+                elif self.textEditMode():
+                    items_at = self.items(event.scenePos())
+                    has_textblk = any(isinstance(i, TextBlkItem) for i in items_at)
+                    if not has_textblk:
+                        # 左鍵點在空白處 → 啟動 rubber band 框選（仿 Windows 桌面）
+                        self.rubber_band_origin = event.scenePos()
+                        self.rubber_band.setGeometry(QRectF(self.rubber_band_origin, self.rubber_band_origin).normalized())
+                        self.rubber_band.show()
+                        self.rubber_band.setZValue(1)
 
             elif btn == Qt.MouseButton.RightButton:
                 # user is drawing using eraser
                 if self.painting:
                     erasing = self.image_edit_mode == ImageEditMode.PenTool
                     self.addStrokeImageItem(self.inpaintLayer.mapFromScene(event.scenePos()), self.erasing_pen, erasing)
-                else:   # rubber band selection
-                    self.rubber_band_origin = event.scenePos()
-                    self.rubber_band.setGeometry(QRectF(self.rubber_band_origin, self.rubber_band_origin).normalized())
-                    self.rubber_band.show()
-                    self.rubber_band.setZValue(1)
+                elif self.textEditMode():
+                    # 右鍵按下：先記錄位置，等 mouseMoveEvent 判斷是點擊還是拖曳
+                    self.rb_drag_start = event.scenePos()
+                    self.rb_drag_pending = True
 
         return super().mousePressEvent(event)
 
@@ -696,16 +716,19 @@ class Canvas(QGraphicsScene):
 
         self.hide_rubber_band()
 
-        Qt.MouseButton.LeftButton
+        created_textblock = False
         if btn == Qt.MouseButton.MiddleButton:
             self.mid_btn_pressed = False
         if self.creating_textblock:
             tgt = 0 if btn == Qt.MouseButton.LeftButton else 1
             self.endCreateTextblock(btn=tgt)
+            created_textblock = True
         if btn == Qt.MouseButton.RightButton:
+            self.rb_drag_pending = False
+            self.rb_drag_start = None
             if self.stroke_img_item is not None:
                 self.finish_erasing.emit(self.stroke_img_item)
-            if self.textEditMode():
+            if self.textEditMode() and not created_textblock:
                 self.context_menu_requested.emit(event.screenPos(), False)
         elif btn == Qt.MouseButton.LeftButton:
             if self.stroke_img_item is not None:
@@ -873,6 +896,8 @@ class Canvas(QGraphicsScene):
         self.pending_create_textblock = False
         self.create_block_origin = None
         self.editing_textblkitem = None
+        self.rb_drag_pending = False
+        self.rb_drag_start = None
         self.gv.ctrl_pressed = False
         if self.stroke_img_item is not None:
             self.removeItem(self.stroke_img_item)
