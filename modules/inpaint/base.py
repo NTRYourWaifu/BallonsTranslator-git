@@ -98,11 +98,7 @@ class InpainterBase(BaseModule):
                         if std_max < inpaint_thresh:
                             need_inpaint = False
                             im[np.where(ballon_msk > 0)] = average_bg_color
-                        # cv2.imshow('im', im)
-                        # cv2.imshow('ballon', ballon_msk)
-                        # cv2.imshow('non_text', non_text_msk)
-                        # cv2.waitKey(0)
-                
+
                 if need_inpaint:
                     inpainted[xyxy_e[1]:xyxy_e[3], xyxy_e[0]:xyxy_e[2]] = self.memory_safe_inpaint(im, msk)
 

@@ -9,6 +9,7 @@ from qtpy.QtCore import QObject, Signal
 from .base import register_textdetectors, TextDetectorBase, TextBlock
 from utils.imgproc_utils import xywh2xyxypoly
 from utils.textblock import examine_textblk
+from utils.textblock_mask import canny_flood
 
 
 class DetectorSignals(QObject):
@@ -494,10 +495,25 @@ class DetectorYOLOv8(TextDetectorBase):
 
             blk_list.append(blk)
 
-        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+        # bbox 範圍內用 canny_flood 抽出實際文字筆畫，避免整框填 255
+        # 整框填 255 會讓 LAMA inpaint 失去 context，吐出 learned 平均色（粉/褐色塊）
+        im_h, im_w = img.shape[:2]
+        mask = np.zeros((im_h, im_w), dtype=np.uint8)
         for blk in blk_list:
             bx1, by1, bx2, by2 = blk.xyxy
-            mask[by1:by2, bx1:bx2] = 255
+            bx1 = max(0, int(bx1)); by1 = max(0, int(by1))
+            bx2 = min(im_w, int(bx2)); by2 = min(im_h, int(by2))
+            if bx2 <= bx1 or by2 <= by1:
+                continue
+            roi = img[by1:by2, bx1:bx2]
+            try:
+                text_mask, _, _ = canny_flood(roi)
+                # text_mask 是文字筆畫像素 mask (0/255)，貼回原圖座標
+                mask[by1:by2, bx1:bx2] = np.maximum(mask[by1:by2, bx1:bx2], text_mask)
+            except Exception as e:
+                # 抽取失敗時退回原本的矩形填充，保證 inpaint 至少有東西做
+                self.logger.warning(f"[YOLO mask] canny_flood failed at {blk.xyxy}: {e}, fallback to bbox fill")
+                mask[by1:by2, bx1:bx2] = 255
 
         return mask, blk_list
 
