@@ -80,9 +80,35 @@ def find_all_files_recursive(tgt_dir: Union[List, str], ext: Union[List, set], e
     
     return filelst
 
+_HEIF_REGISTERED = False
+
+def _ensure_heif_registered():
+    global _HEIF_REGISTERED
+    if _HEIF_REGISTERED:
+        return True
+    try:
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+        _HEIF_REGISTERED = True
+        return True
+    except Exception:
+        return False
+
 def imread(imgpath, read_type=cv2.IMREAD_COLOR):
     if not osp.exists(imgpath):
         return None
+    ext = osp.splitext(imgpath)[1].lower()
+    if ext == '.avif':
+        if not _ensure_heif_registered():
+            return None
+        try:
+            pil_img = Image.open(imgpath)
+            if read_type == cv2.IMREAD_GRAYSCALE:
+                return np.array(pil_img.convert('L'))
+            arr = np.array(pil_img.convert('RGB'))
+            return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        except Exception:
+            return None
     img = cv2.imdecode(np.fromfile(imgpath, dtype=np.uint8), read_type)
     return img
 

@@ -16,7 +16,7 @@ from utils.textblock import TextBlock, TextAlignment
 from utils import shared
 from utils import create_error_dialog
 from modules.translators.trans_chatgpt import GPTTranslator
-from .misc import parse_stylesheet, set_html_family, QKEY
+from .misc import parse_stylesheet, set_html_family, QKEY, ndarray2pixmap
 from utils.config import ProgramConfig, pcfg, save_config, text_styles, save_text_styles, load_textstyle_from, FontFormat
 from .config_proj import ProjImgTrans
 from .canvas import Canvas
@@ -1255,8 +1255,21 @@ class MainWindow(mainwindow_cls):
         self.imgtrans_proj.save()
 
         # OCR 模式下字體尚未算好，result 圖交由 on_page_ocr_trans_done 在字體計算後存
+        # 例外：OCR 模式但該頁無對話框（純圖）→ _do_page_ocr_trans_done 會 early return
+        # 不能走 saveCurrentPage（會渲染 scene 上殘留的其他頁 textitem），改為直接寫該頁 inpainted_array
         if not pcfg.module.enable_ocr:
             self.saveCurrentPage(False, False)
+        else:
+            imgname = self.imgtrans_proj.idx2pagename(page_index)
+            if not self.imgtrans_proj.pages.get(imgname, []):
+                inpainted = self.imgtrans_proj.load_inpainted_by_imgname(imgname)
+                if inpainted is None:
+                    inpainted = self.imgtrans_proj.read_img(imgname)
+                if inpainted is not None:
+                    save_path = self.imgtrans_proj.get_result_path(imgname)
+                    qimg = ndarray2pixmap(inpainted, return_qimg=True)
+                    self.imsave_thread.saveImg(save_path, qimg, imgname,
+                                                save_params={'ext': pcfg.imgsave_ext, 'quality': pcfg.imgsave_quality})
 
     def on_page_inpaint_done(self, imgname: str, mask, inpainted):
         """inpaint 完成後直接用傳來的 array 更新 in-memory mask/inpainted，不從磁碟讀。"""

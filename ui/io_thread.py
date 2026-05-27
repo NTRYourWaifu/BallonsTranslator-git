@@ -17,7 +17,7 @@ from .config_proj import ProjImgTrans
 from .custom_widget import ProgressMessageBox
 
 # SVT-AV1 via FFmpeg Full Build
-_FFMPEG_SVTAV1 = r'H:\Download\Toolpackage\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe'
+_FFMPEG_SVTAV1 = r'F:\Vs\Toolpackage\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe'
 _AVIF_PRESET = 8        # 平衡
 _AVIF_MAX_DIM = 4096    # Android 硬體 AV1 decoder 上限（Samsung Helio G99）
 _SCALE_FILTER = (
