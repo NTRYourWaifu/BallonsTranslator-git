@@ -59,3 +59,10 @@ lssues.md
 /003_grid.jpg
 /model cost.md
 /ocr_debug/
+
+# === 管理文件（待辦看板有備份，不進版控）===
+docs/待辦.yaml
+docs/待辦總表.md
+
+# === 試跑產物 ===
+headless/status.json

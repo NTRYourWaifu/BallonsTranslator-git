@@ -3,7 +3,7 @@ import threading
 from typing import Union, List, Dict, Callable
 
 import numpy as np
-from qtpy.QtCore import QThread, Signal, QObject, QLocale, QTimer
+from qtpy.QtCore import Qt, QThread, Signal, QObject, QLocale, QTimer
 
 from .funcmaps import get_maskseg_method
 from utils.logger import logger as LOGGER
@@ -23,6 +23,7 @@ from utils import create_error_dialog, create_info_dialog, connect_once
 from .custom_widget import ImgtransProgressMessageBox
 from .configpanel import ConfigPanel
 from .config_proj import ProjImgTrans
+from .page_lifecycle import PageLifecycleManager, PageStage
 from utils.config import pcfg
 cfg_module = pcfg.module
 
@@ -264,7 +265,6 @@ class ImgtransThread(QThread):
     finish_blktrans_stage = Signal(str, int)
     finish_blktrans = Signal(int, list)
     unload_modules = Signal(list)
-    page_ocr_trans_done = Signal(str)   # imgname，OCR（+翻譯）真正完成後 emit
     page_inpaint_done = Signal(str, object, object)  # (imgname, mask, inpainted)，inpaint 完成後 emit
 
     detect_counter = 0
@@ -289,12 +289,12 @@ class ImgtransThread(QThread):
         self._pause_event = threading.Event()
         self._pause_event.set()   # set = 不暫停，clear = 暫停
         self._stop_flag = False
-        self.start_from_imgname: str = None   # None = 從頭跑
-        self.only_run_pages: list = None       # 非 None 時只跑這些頁
-        self.last_stopped_imgname: str = None  # 記錄上次停在哪
+        # last_stopped_imgname 是 pause/stop 後記錄停止位置，供 resumeFromLastStopped 用（跑後狀態，非啟動參數）
+        self.last_stopped_imgname: str = None
         self.page_start_offset: int = 0
         self._ocr_counter_lock = threading.Lock()
         self._translate_counter_lock = threading.Lock()
+        self.lifecycle = PageLifecycleManager()
 
     @property
     def textdetector(self) -> TextDetectorBase:
@@ -312,10 +312,11 @@ class ImgtransThread(QThread):
     def inpainter(self) -> InpainterBase:
         return self.inpaint_thread.inpainter
 
-    def runImgtransPipeline(self, imgtrans_proj: ProjImgTrans):
+    def runImgtransPipeline(self, imgtrans_proj: ProjImgTrans,
+                            start_from: str = None, only_pages: list = None):
         self.imgtrans_proj = imgtrans_proj
         self.num_pages = len(self.imgtrans_proj.pages)
-        self.job = self._imgtrans_pipeline
+        self.job = lambda: self._imgtrans_pipeline(start_from=start_from, only_pages=only_pages)
         self.start()
 
     def runBlktransPipeline(self, blk_list: List[TextBlock], tgt_img: np.ndarray, mode: int, blk_ids: List[int], tgt_mask):
@@ -362,29 +363,44 @@ class ImgtransThread(QThread):
                     self.finish_blktrans_stage.emit('inpaint', int((ii+1) * progress_prod))
         self.finish_blktrans.emit(mode, blk_ids)
 
-    def _imgtrans_pipeline(self):
+    def _imgtrans_pipeline(self, start_from: str = None, only_pages: list = None):
         self.detect_counter = 0
         self.ocr_counter = 0
         self.translate_counter = 0
         self.inpaint_counter = 0
 
         all_pages = list(self.imgtrans_proj.pages.keys())
-        if self.only_run_pages is not None:
-            only = [p for p in self.only_run_pages if p in all_pages]
+        if only_pages is not None:
+            only = [p for p in only_pages if p in all_pages]
             start_idx = all_pages.index(only[0]) if only else 0
             pages_to_run = only
-            self.only_run_pages = None
-            self.start_from_imgname = None
-        elif self.start_from_imgname and self.start_from_imgname in all_pages:
-            start_idx = all_pages.index(self.start_from_imgname)
+        elif start_from and start_from in all_pages:
+            start_idx = all_pages.index(start_from)
             pages_to_run = all_pages[start_idx:]
-            self.start_from_imgname = None
         else:
             start_idx = 0
             pages_to_run = all_pages
-            self.start_from_imgname = None
         self.page_start_offset = start_idx
         self.num_pages = len(pages_to_run)
+
+        # 此段 4 個 if cfg_module.enable_*（連同下方 enable_ocr or enable_translate）是
+        # lifecycle expected_stages 的「source」（lifecycle.expects_stage() 查詢即建於此處輸入）。
+        expected = {PageStage.PENDING}
+        if cfg_module.enable_detect:
+            expected.add(PageStage.DETECTED)
+        if cfg_module.enable_inpaint:
+            expected.add(PageStage.INPAINTED)
+        if cfg_module.enable_ocr:
+            expected.add(PageStage.OCRED)
+        # worker 路徑（enable_ocr or enable_translate）下必含 TRANSLATED。
+        # enable_translate=False 時 worker 仍 noop mark TRANSLATED 推進 FSM 鏈
+        # （TRANSLATED → FONT_CALCULATED → DONE）。否則卡 OCRED 永遠到不了 DONE。
+        if cfg_module.enable_ocr or cfg_module.enable_translate:
+            expected.add(PageStage.TRANSLATED)
+        # FONT_CALCULATED 由主執行緒 runner mark（empty blk 走 noop mark，符合方案 B）
+        expected.add(PageStage.FONT_CALCULATED)
+        expected.add(PageStage.DONE)
+        self.lifecycle.initialize(pages_to_run, expected)
 
         low_vram_trans = self.translator.low_vram_mode if self.translator is not None else False
 
@@ -397,7 +413,9 @@ class ImgtransThread(QThread):
         import queue as _queue
         ocr_queue = _queue.Queue()
         ocr_workers = []
-        need_bg_ocr = (cfg_module.enable_ocr or cfg_module.enable_translate) and not low_vram_trans
+        # A1 (PR6)：need_bg_ocr 判定要不要啟動背景 OCR worker。
+        # expects_stage(TRANSLATED) ↔ (enable_ocr or enable_translate)（lifecycle 依此初始化）。
+        need_bg_ocr = self.lifecycle.expects_stage(PageStage.TRANSLATED) and not low_vram_trans
         if need_bg_ocr:
             if self.ocr is not None and self.ocr.is_computational_intensive():
                 num_ocr_workers = 1
@@ -424,7 +442,8 @@ class ImgtransThread(QThread):
             mask = blk_list = inpainted = None
             need_save_mask = False
 
-            if cfg_module.enable_detect:
+            # A2 (PR6)：Phase 1 detect 環節判定。
+            if self.lifecycle.expects_stage(PageStage.DETECTED):
                 try:
                     if hasattr(self.textdetector, 'current_imgname'):
                         self.textdetector.current_imgname = imgname
@@ -439,11 +458,16 @@ class ImgtransThread(QThread):
                 self.detect_counter += 1
                 self.update_detect_progress.emit(self.detect_counter)
                 self.imgtrans_proj.pages[imgname] = blk_list
+                self.lifecycle.mark_done(imgname, PageStage.DETECTED, payload={
+                    'blk_count': len(blk_list),
+                    'has_mask': bool(mask is not None and mask.sum() > 0),
+                })
 
             if blk_list is None:
                 blk_list = self.imgtrans_proj.pages[imgname] if imgname in self.imgtrans_proj.pages else []
 
-            if cfg_module.enable_inpaint:
+            # A3 (PR6)：Phase 1 inpaint 環節判定。
+            if self.lifecycle.expects_stage(PageStage.INPAINTED):
                 if mask is None:
                     mask = self.imgtrans_proj.load_mask_by_imgname(imgname)
                 if mask is not None:
@@ -454,6 +478,9 @@ class ImgtransThread(QThread):
                         create_error_dialog(e, self.tr('Inpainting Failed.'), 'InpaintFailed')
                 self.inpaint_counter += 1
                 self.update_inpaint_progress.emit(self.inpaint_counter)
+                self.lifecycle.mark_done(imgname, PageStage.INPAINTED, payload={
+                    'has_inpainted': inpainted is not None,
+                })
 
             if need_save_mask and mask is not None:
                 self.imgtrans_proj.save_mask(imgname, mask)
@@ -461,6 +488,10 @@ class ImgtransThread(QThread):
 
             if need_bg_ocr:
                 ocr_queue.put(imgname)
+            else:
+                # 沒有 OCR worker 的模式（純 detect / 純 inpaint / detect+inpaint）。
+                # 沒字體要算，FONT_CALCULATED 直接 noop mark；主執行緒 runner 收到後跑 _refresh_ui_for_page 並 mark DONE
+                self.lifecycle.mark_done(imgname, PageStage.FONT_CALCULATED, payload={'font_sizes': {}})
 
         # ── 等待背景 Worker 完成 ──
         if ocr_workers:
@@ -470,27 +501,42 @@ class ImgtransThread(QThread):
                 w.join()
 
         # ── Low VRAM 模式：Phase 1 完成後順序處理 OCR + 翻譯 ──
+        # A4 (PR6)：low_vram 路徑 A 類替換：
+        #   A4a/A4b → expects_stage(DETECTED|INPAINTED|OCRED)
+        #   A4c → 保留 cfg_module.enable_translate（同 A5：實際跑 translator 的意圖判定）
+        #   A4d → 重構：if expects_stage(TRANSLATED) 包整段，內部以 cfg_module.enable_translate 拆「是否真跑 translator」職責
         if low_vram_trans:
-            if cfg_module.enable_detect or cfg_module.enable_inpaint:
+            if self.lifecycle.expects_stage(PageStage.DETECTED) or self.lifecycle.expects_stage(PageStage.INPAINTED):
                 unload_modules(self, ['textdetector', 'inpainter'])
-            if cfg_module.enable_ocr:
+            if self.lifecycle.expects_stage(PageStage.OCRED):
                 for imgname in pages_to_run:
                     if self._stop_flag:
                         break
                     ocr_count = self._do_ocr_page(imgname)
                     self.update_ocr_progress.emit(ocr_count)
-            if cfg_module.enable_translate:
-                unload_modules(self, ['ocr'])
+                    _blk_list = self.imgtrans_proj.pages.get(imgname, [])
+                    _blk_with_text = sum(1 for b in _blk_list if (b.get_text() or '').strip())
+                    self.lifecycle.mark_done(imgname, PageStage.OCRED, payload={
+                        'blk_count_with_text': _blk_with_text,
+                    })
+            # A4c+A4d 合一：expects_stage(TRANSLATED) 包整段，內部以 cfg_module.enable_translate 拆職責
+            if self.lifecycle.expects_stage(PageStage.TRANSLATED):
+                # A4c：保留 cfg_module.enable_translate（expects_stage(TRANSLATED) 含 enable_ocr+!translate 場景）
+                if cfg_module.enable_translate:
+                    unload_modules(self, ['ocr'])
                 for imgname in pages_to_run:
                     if self._stop_flag:
                         break
-                    blk_list = self.imgtrans_proj.pages.get(imgname, [])
-                    try:
-                        self.translator.translate_textblk_lst(blk_list)
-                    except Exception as e:
-                        create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
-                    self.translate_counter += 1
-                    self.update_translate_progress.emit(self.translate_counter)
+                    if cfg_module.enable_translate:
+                        blk_list = self.imgtrans_proj.pages.get(imgname, [])
+                        try:
+                            self.translator.translate_textblk_lst(blk_list)
+                        except Exception as e:
+                            create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+                        self.translate_counter += 1
+                        self.update_translate_progress.emit(self.translate_counter)
+                    self.lifecycle.mark_done(imgname, PageStage.TRANSLATED, payload={})
+            # low_vram 路徑 DONE 由主執行緒 runner 在 _refresh_ui_for_page 結尾 mark
 
     def _ocr_translate_worker(self, ocr_queue, start_delay: float = 0.0):
         """背景執行緒：逐頁 OCR + 翻譯，不阻塞 Phase 1 的 detect/inpaint。"""
@@ -511,8 +557,15 @@ class ImgtransThread(QThread):
                 break
 
             ocr_count = self._do_ocr_page(imgname)
+            if cfg_module.enable_ocr and not self._stop_flag:
+                _blk_list = self.imgtrans_proj.pages.get(imgname, [])
+                _blk_with_text = sum(1 for b in _blk_list if (b.get_text() or '').strip())
+                self.lifecycle.mark_done(imgname, PageStage.OCRED, payload={
+                    'blk_count_with_text': _blk_with_text,
+                })
 
             translate_count = None
+            # A5：保留 cfg_module.enable_translate（實際跑 translator 的意圖判定，與 expects_stage(TRANSLATED) 不等價）
             if cfg_module.enable_translate and not self._stop_flag:
                 blk_list = self.imgtrans_proj.pages.get(imgname, [])
                 try:
@@ -522,20 +575,21 @@ class ImgtransThread(QThread):
                 with self._translate_counter_lock:
                     self.translate_counter += 1
                     translate_count = self.translate_counter
+                if not self._stop_flag:
+                    self.lifecycle.mark_done(imgname, PageStage.TRANSLATED, payload={})
+            elif cfg_module.enable_ocr and not self._stop_flag:
+                # enable_translate=False 但有 OCR worker → noop mark TRANSLATED 推進 FSM
+                self.lifecycle.mark_done(imgname, PageStage.TRANSLATED, payload={})
 
-            # page_ocr_trans_done 必須先於進度更新 emit：
-            # 若進度更新先到主執行緒，可能觸發 finishImgtransPipeline → 切換下一本書，
-            # 導致最後一頁的 page_ocr_trans_done 被 early return 掉（字型/顏色未處理）
-            if not self._stop_flag and cfg_module.enable_ocr:
-                self.page_ocr_trans_done.emit(imgname)
-
+            # DONE 由主執行緒 runner 在 _refresh_ui_for_page 結尾 mark；worker 只負責到 TRANSLATED
             self.update_ocr_progress.emit(ocr_count)
             if translate_count is not None:
                 self.update_translate_progress.emit(translate_count)
 
     def _do_ocr_page(self, imgname) -> int:
         """單頁 OCR + restore_ocr_empty 處理。回傳更新後的 ocr_counter，由呼叫方決定何時 emit 進度。"""
-        if not cfg_module.enable_ocr:
+        # A7 (PR6)
+        if not self.lifecycle.expects_stage(PageStage.OCRED):
             return 0
 
         img = self.imgtrans_proj.read_img(imgname)
@@ -576,49 +630,10 @@ class ImgtransThread(QThread):
             local_count = self.ocr_counter
         return local_count
 
-    def detect_finished(self) -> bool:
-        if self.imgtrans_proj is None:
-            return True
-        return self.detect_counter == self.num_pages or not cfg_module.enable_detect
-
-    def ocr_finished(self) -> bool:
-        if self.imgtrans_proj is None:
-            return True
-        return self.ocr_counter == self.num_pages or not cfg_module.enable_ocr
-
-    def translate_finished(self) -> bool:
-        if self.imgtrans_proj is None \
-            or not cfg_module.enable_ocr \
-            or not cfg_module.enable_translate:
-            return True
-        if self.parallel_trans:
-            return self.translate_thread.pipeline_finished()
-        return self.translate_counter == self.num_pages or not cfg_module.enable_translate
-
-    def inpaint_finished(self) -> bool:
-        if self.imgtrans_proj is None or not cfg_module.enable_inpaint:
-            return True
-        return self.inpaint_counter == self.num_pages or not cfg_module.enable_inpaint
-
     def run(self):
         if self.job is not None:
             self.job()
         self.job = None
-
-    def recent_finished_index(self, ref_counter: int) -> int:
-        if cfg_module.enable_detect:
-            ref_counter = min(ref_counter, self.detect_counter)
-        if cfg_module.enable_ocr:
-            ref_counter = min(ref_counter, self.ocr_counter)
-        if cfg_module.enable_inpaint:
-            ref_counter = min(ref_counter, self.inpaint_counter)
-        if cfg_module.enable_translate:
-            if self.parallel_trans:
-                ref_counter = min(ref_counter, self.translate_thread.finished_counter)
-            else:
-                ref_counter = min(ref_counter, self.translate_counter)
-
-        return ref_counter - 1 + self.page_start_offset
 
 
 def merge_config_module_params(config_params: Dict, module_keys: List, get_module: Callable) -> Dict:
@@ -755,6 +770,13 @@ class ModuleManager(QObject):
         self.imgtrans_thread.update_inpaint_progress.connect(self.on_update_inpaint_progress)
         self.imgtrans_thread.finish_blktrans_stage.connect(self.on_finish_blktrans_stage)
         self.imgtrans_thread.finish_blktrans.connect(self.on_finish_blktrans)
+        # PR2：lifecycle.all_done 觸發 finishImgtransPipeline（取代 progress signal 達 100% 觸發）
+        self.imgtrans_thread.lifecycle.all_done.connect(
+            self._on_lifecycle_all_done,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        # PR3：page_trans_finished 改由 mainwindow._on_lifecycle_transition(TRANSLATED) 統一觸發，
+        # 確保與 _run_font_calc 在同一 slot 內順序執行（避免 Qt event loop tick 順序不確定性）
 
         self.translator_panel = translator_panel = config_panel.trans_config_panel        
         translator_params = merge_config_module_params(cfg_module.translator_params, GET_VALID_TRANSLATORS(), TRANSLATORS.get)
@@ -854,26 +876,32 @@ class ModuleManager(QObject):
             LOGGER.info('proj file is empty, nothing to do')
             self.progress_msgbox.hide()
             return
-        self.last_finished_index = -1
         self.terminateRunningThread()
         if reset_stats and self.ocr_stats_bar is not None:
             self.ocr_stats_bar.reset()
         
+        # A8 (PR5a 註解)：全停特殊路徑（4 個 enable_* 全 False）。
+        # PR6 保留 cfg_module.all_stages_disabled() 判定：此路徑在 _imgtrans_pipeline 之前 return，
+        # lifecycle 尚未 initialize，無法用 lifecycle.expects_stage 查詢。
         if cfg_module.all_stages_disabled() and self.imgtrans_proj is not None and self.imgtrans_proj.num_pages > 0:
             for ii in range(self.imgtrans_proj.num_pages):
                 self.page_trans_finished.emit(ii)
             self.imgtrans_pipeline_finished.emit()
             return
-        
+
+        # C 類 (PR5a 註解)：progress bar 顯示為純呈現派生值，PR6 保留 cfg_module.enable_*
+        # （progress_msgbox 與 lifecycle 無關，純 UI 顯示）。
         self.progress_msgbox.detect_bar.setVisible(cfg_module.enable_detect)
         self.progress_msgbox.ocr_bar.setVisible(cfg_module.enable_ocr)
         self.progress_msgbox.translate_bar.setVisible(cfg_module.enable_translate)
         self.progress_msgbox.inpaint_bar.setVisible(cfg_module.enable_inpaint)
         self.progress_msgbox.zero_progress()
         self.progress_msgbox.show()
-        self.imgtrans_thread.only_run_pages = only_pages
-        self.imgtrans_thread.start_from_imgname = start_from if only_pages is None else None
-        self.imgtrans_thread.runImgtransPipeline(self.imgtrans_proj)
+        self.imgtrans_thread.runImgtransPipeline(
+            self.imgtrans_proj,
+            start_from=start_from if only_pages is None else None,
+            only_pages=only_pages,
+        )
 
     def pauseImgtransPipeline(self):
         """暫停：等目前頁跑完後中斷，記錄位置，殺彈窗，清顯存"""
@@ -939,54 +967,37 @@ class ModuleManager(QObject):
         self.progress_msgbox.hide()
 
     def on_update_detect_progress(self, progress: int):
-        ri = self.imgtrans_thread.recent_finished_index(progress)
         if 'detect' in shared.pbar:
             shared.pbar['detect'].update(1)
-        progress = int(progress / self.imgtrans_thread.num_pages * 100)
-        self.progress_msgbox.updateDetectProgress(progress)
-        if ri >= 0 and ri != self.last_finished_index:
-            self.last_finished_index = ri
-            self.page_trans_finished.emit(ri)
-        if progress == 100:
-            self.finishImgtransPipeline()
+        progress_pct = int(progress / self.imgtrans_thread.num_pages * 100)
+        self.progress_msgbox.updateDetectProgress(progress_pct)
 
     def on_update_ocr_progress(self, progress: int):
-        ri = self.imgtrans_thread.recent_finished_index(progress)
         if 'ocr' in shared.pbar:
             shared.pbar['ocr'].update(1)
-        progress = int(progress / self.imgtrans_thread.num_pages * 100)
-        self.progress_msgbox.updateOCRProgress(progress)
-        if ri >= 0 and ri != self.last_finished_index:
-            self.last_finished_index = ri
-            self.page_trans_finished.emit(ri)
-        if progress == 100:
-            self.finishImgtransPipeline()
+        progress_pct = int(progress / self.imgtrans_thread.num_pages * 100)
+        self.progress_msgbox.updateOCRProgress(progress_pct)
 
     def on_update_translate_progress(self, progress: int):
-        ri = self.imgtrans_thread.recent_finished_index(progress)
         if 'translate' in shared.pbar:
             shared.pbar['translate'].update(1)
-        progress = int(progress / self.imgtrans_thread.num_pages * 100)
-        self.progress_msgbox.updateTranslateProgress(progress)
-        if ri >= 0 and ri != self.last_finished_index:
-            self.last_finished_index = ri
-            self.page_trans_finished.emit(ri)
-        if progress == 100:
-            self.finishImgtransPipeline()
+        progress_pct = int(progress / self.imgtrans_thread.num_pages * 100)
+        self.progress_msgbox.updateTranslateProgress(progress_pct)
 
     def on_update_inpaint_progress(self, progress: int):
-        ri = self.imgtrans_thread.recent_finished_index(progress)
         if 'inpaint' in shared.pbar:
             shared.pbar['inpaint'].update(1)
-        progress = int(progress / self.imgtrans_thread.num_pages * 100)
-        self.progress_msgbox.updateInpaintProgress(progress)
-        if ri >= 0 and ri != self.last_finished_index:
-            self.last_finished_index = ri
-            self.page_trans_finished.emit(ri)
-        if progress == 100:
-            self.finishImgtransPipeline()
+        progress_pct = int(progress / self.imgtrans_thread.num_pages * 100)
+        self.progress_msgbox.updateInpaintProgress(progress_pct)
+
+    def _on_lifecycle_all_done(self):
+        """lifecycle 已確保所有頁的所有 mark_done 都到達，叫 finishImgtransPipeline 不會有時序問題。"""
+        self.finishImgtransPipeline()
+
 
     def progress(self):
+        # C 類 (PR5a 註解)：progress() 為純呈現派生值（progress bar / tqdm pbar），
+        # 與 lifecycle stage 無關。PR6 保留 cfg_module.enable_*（同上方 progress_msgbox.*_bar.setVisible）。
         progress = {}
         num_pages = self.imgtrans_thread.num_pages
         if cfg_module.enable_detect:
@@ -1000,12 +1011,8 @@ class ModuleManager(QObject):
         return progress
 
     def proj_finished(self):
-        if self.imgtrans_thread.detect_finished() \
-            and self.imgtrans_thread.ocr_finished() \
-                and self.imgtrans_thread.translate_finished() \
-                    and self.imgtrans_thread.inpaint_finished():
-            return True
-        return False
+        # Pipeline 完成判定由 lifecycle 統一裁定（所有頁 current_stage == DONE）。
+        return self.imgtrans_thread.lifecycle.is_all_done()
 
     def finishImgtransPipeline(self):
         if self.proj_finished():

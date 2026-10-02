@@ -155,9 +155,6 @@ class MainWindow(mainwindow_cls):
         self._gui_batch_current = None
         self._gui_batch_running = False
         self._page_ocr_cache: dict = {}   # {folder_path: {imgname: {event_type: count}}}
-        self._current_run_page_indices: set = None  # 單頁/部分執行時限制接受的 page_index，None = 全量
-        self._ocr_done_queue: list = []   # 待處理的 on_page_ocr_trans_done imgname 佇列
-        self._ocr_done_processing = False  # 是否正在處理中
         self._schedule_dialog: ScheduleDialog = None
 
         self.setupThread()
@@ -369,8 +366,16 @@ class MainWindow(mainwindow_cls):
         module_manager.imgtrans_thread.mask_postprocess = self.drawingPanel.rectPanel.post_process_mask
         module_manager.blktrans_pipeline_finished.connect(self.on_blktrans_finished)
         module_manager.imgtrans_thread.post_process_mask = self.drawingPanel.rectPanel.post_process_mask
-        module_manager.imgtrans_thread.page_ocr_trans_done.connect(self.on_page_ocr_trans_done)
         module_manager.imgtrans_thread.page_inpaint_done.connect(self.on_page_inpaint_done)
+        # lifecycle transition（QueuedConnection 跨執行緒安全）
+        module_manager.imgtrans_thread.lifecycle.transition.connect(
+            self._on_lifecycle_transition,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        module_manager.imgtrans_thread.lifecycle.all_done.connect(
+            self._on_lifecycle_all_done,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self.leftBar.run_imgtrans.connect(self.on_run_imgtrans)
         self.leftBar.scheduleBtn.clicked.connect(self.on_schedule_btn_clicked)
@@ -1056,12 +1061,9 @@ class MainWindow(mainwindow_cls):
             self.st_manager.updateTranslation()
 
     def _prepare_imgtrans_run(self, start_from: str = None, reset_stats: bool = True, only_pages: list = None):
-        """on_run_imgtrans 的前置工作，支援從指定頁開始或只跑指定頁清單"""
-        if only_pages:
-            all_keys = list(self.imgtrans_proj.pages.keys())
-            self._current_run_page_indices = {all_keys.index(p) for p in only_pages if p in all_keys}
-        else:
-            self._current_run_page_indices = None
+        """on_run_imgtrans 的前置工作，支援從指定頁開始或只跑指定頁清單。
+        PR6：殘留 signal 過濾由 lifecycle 接管——initialize 只放本批 pages_to_run，
+        非本批 imgname 的 mark_done 自動 reject、不發 transition，page_trans_finished 也不會 emit。"""
         start_run_log()
         self.backup_blkstyles.clear()
         if reset_stats:
@@ -1108,6 +1110,9 @@ class MainWindow(mainwindow_cls):
                         ffmt_list.append(textblk.fontformat.deepcopy())
                     if pcfg.module.enable_ocr:
                         textblk.text = []
+                        # D3 (PR4b 註解)：只清 srgb 保留 frgb（偵測值）。配對：_apply_color_stroke_and_fontcalc 內顏色兜底還原。
+                        # 動其一必動其二——若改成連 frgb 一起清，會 Bug 1 復發（文字全黑）。
+                        # 歷史：project_autosave_stroke_fix.md Bug 1。
                         textblk.set_font_colors(bg_colors=(0, 0, 0))
                     if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
                         textblk.rich_text = ''
@@ -1118,7 +1123,6 @@ class MainWindow(mainwindow_cls):
         flush_run_log('finished')
         self.backup_blkstyles.clear()
         self._run_imgtrans_wo_textstyle_update = False
-        self._current_run_page_indices = None
         self.postprocess_mt_toggle = True
         if pcfg.module.empty_runcache and not shared.HEADLESS:
             self.module_manager.unload_all_models()
@@ -1166,9 +1170,6 @@ class MainWindow(mainwindow_cls):
                 blk.translation = blk.translation.upper()
 
     def on_pagtrans_finished(self, page_index: int):
-        if self._current_run_page_indices is not None and page_index not in self._current_run_page_indices:
-            LOGGER.info(f'[on_pagtrans_finished] 忽略殘留 signal page_index={page_index}（本次批次={self._current_run_page_indices}）')
-            return
         blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
         ffmt_list = None
         if len(self.backup_blkstyles) == self.imgtrans_proj.num_pages and len(self.backup_blkstyles[page_index]) == len(blk_list):
@@ -1201,8 +1202,12 @@ class MainWindow(mainwindow_cls):
                         blk.font_size = blk._detected_font_size
                     if override_fnt_stroke:
                         blk.stroke_width = gf.stroke_width
-                    elif pcfg.module.enable_ocr:
-                        blk.recalulate_stroke_width()
+                    # PR5b：E3 已移除。原本「elif enable_ocr: recalulate_stroke_width()」在「D3 清過 srgb、
+                    # 顏色未還原」狀態算 stroke，sw>0 時後續 _apply 內 `if stroke_width == 0` 兜底不觸發
+                    # → 錯誤值保留（latent bug）。改由 _apply_color_stroke_and_fontcalc 內
+                    # 顏色還原之後無條件算（順序：顏色 → stroke → E5 補正 → calc render）。
+                    # 同時涵蓋 override_fnt_size=True + enable_ocr=True 場景（PR5b 移除
+                    # _run_font_calc / _do_page_ocr_trans_done 內 override_fnt_size early return）。
                     if override_fnt_color:
                         blk.set_font_colors(fg_colors=gf.frgb)
                     if override_fnt_scolor:
@@ -1229,47 +1234,47 @@ class MainWindow(mainwindow_cls):
                     blk.italic = gf.italic
                     blk.bold = gf.bold
                     blk.underline = gf.underline
-                    sw = blk.stroke_width
-                    if sw > 0 and pcfg.module.enable_ocr and pcfg.module.enable_detect and not override_fnt_size:
-                        blk.font_size = blk.font_size / (1 + sw)
+                    # PR5b：E5 已移除。原本依賴 E3 算的 stroke（顏色未還原狀態，sw 可能不準）做 font_size 補正。
+                    # 搬到 _apply_color_stroke_and_fontcalc 內 stroke 算完之後（順序：顏色 → stroke → E5 補正），
+                    # 確保 sw 是顏色還原後算的正確值。
+                    # 4 個邊界情境（translation 空 / '●●●' / box=0 / override_fnt_size=True）行為等價：
+                    #   情境 1-3：calc_font_size_by_render 不覆寫 → font_size = E5 補正後的值，等同 PR4b。
+                    #   情境 4：_apply 內 calc 段跳過，但 E5 條件含 `not override_fnt_size`，本來就不跑，E5 不影響。
 
             self.st_manager.auto_textlayout_flag = False
 
-        # 若 OCR 啟用，UI 刷新交由 on_page_ocr_trans_done 在字體算好後執行
-        if page_index == self.pageList.currentIndex().row():
-            self.imgtrans_proj.set_current_img_byidx(page_index)
-            if not pcfg.module.enable_ocr:
-                self.canvas.updateCanvas()
-                self.st_manager.updateSceneTextitems()
-        elif not pcfg.module.enable_ocr:
-            self.pageList.setCurrentRow(page_index)
-
-        if not pcfg.module.enable_detect and pcfg.module.enable_translate:
-            for blkitem in self.st_manager.textblk_item_list:
-                blkitem.squeezeBoundingRect()
-
+        # E6 / E7 / E8 規則由 _refresh_canvas_and_save 接管：
+        #   E6 UI 刷新（updateCanvas / updateSceneTextitems / setCurrentRow）→ 內部 UI 段
+        #   E7 squeezeBoundingRect（not enable_detect and enable_translate）→ 內部同條件分支
+        #   E8 純圖頁繞 saveCurrentPage 直接寫 inpainted_array → 內部 `if not blk_list:` 分支
+        #     歷史：project_textless_page_save.md
+        # save proj 每頁仍在此持久化（與 lifecycle stage 無關）。
         if page_index + 1 == self.imgtrans_proj.num_pages:
             self.st_manager.auto_textlayout_flag = False
-
-        # save proj file on page trans finished
         self.imgtrans_proj.save()
 
-        # OCR 模式下字體尚未算好，result 圖交由 on_page_ocr_trans_done 在字體計算後存
-        # 例外：OCR 模式但該頁無對話框（純圖）→ _do_page_ocr_trans_done 會 early return
-        # 不能走 saveCurrentPage（會渲染 scene 上殘留的其他頁 textitem），改為直接寫該頁 inpainted_array
-        if not pcfg.module.enable_ocr:
-            self.saveCurrentPage(False, False)
-        else:
-            imgname = self.imgtrans_proj.idx2pagename(page_index)
-            if not self.imgtrans_proj.pages.get(imgname, []):
-                inpainted = self.imgtrans_proj.load_inpainted_by_imgname(imgname)
-                if inpainted is None:
-                    inpainted = self.imgtrans_proj.read_img(imgname)
-                if inpainted is not None:
-                    save_path = self.imgtrans_proj.get_result_path(imgname)
-                    qimg = ndarray2pixmap(inpainted, return_qimg=True)
-                    self.imsave_thread.saveImg(save_path, qimg, imgname,
-                                                save_params={'ext': pcfg.imgsave_ext, 'quality': pcfg.imgsave_quality})
+    def _on_lifecycle_transition(self, imgname: str, prev, new, payload: dict):
+        """主執行緒 dispatch。同一 slot 內順序執行：
+          TRANSLATED → on_pagtrans_finished（postprocess + override + save proj）→ _run_font_calc_for_page → mark FONT_CALCULATED
+          FONT_CALCULATED → _refresh_ui_for_page → mark DONE
+        順序在單一 slot 內保證，不依賴 Qt event loop tick 順序。
+        """
+        if self.imgtrans_proj is None:
+            return
+        page_index = self.imgtrans_proj.pagename2idx(imgname)
+        if page_index < 0:
+            return
+
+        from .page_lifecycle import PageStage as _PS
+        if new == _PS.TRANSLATED:
+            self.on_pagtrans_finished(page_index)
+            self._run_font_calc_for_page(imgname)
+        elif new == _PS.FONT_CALCULATED:
+            self._refresh_ui_for_page(imgname)
+
+    def _on_lifecycle_all_done(self):
+        """旁路 hook（finishImgtransPipeline 由 ModuleManager._on_lifecycle_all_done 接管）。"""
+        pass
 
     def on_page_inpaint_done(self, imgname: str, mask, inpainted):
         """inpaint 完成後直接用傳來的 array 更新 in-memory mask/inpainted，不從磁碟讀。"""
@@ -1281,39 +1286,20 @@ class MainWindow(mainwindow_cls):
         if inpainted is not None:
             proj.inpainted_array = inpainted.copy()
 
-    def on_page_ocr_trans_done(self, imgname: str):
-        """OCR（+翻譯）真正完成後才呼叫，用 imgname 確保是正確頁面。"""
-        if self.imgtrans_proj is None or imgname not in self.imgtrans_proj.pages:
-            return
-        self._ocr_done_queue.append(imgname)
-        if not self._ocr_done_processing:
-            self._process_next_ocr_done()
-
-    def _process_next_ocr_done(self):
-        if not self._ocr_done_queue:
-            self._ocr_done_processing = False
-            return
-        self._ocr_done_processing = True
-        imgname = self._ocr_done_queue.pop(0)
-        self._do_page_ocr_trans_done(imgname)
-        self._process_next_ocr_done()
-
-    def _do_page_ocr_trans_done(self, imgname: str):
-        if self.imgtrans_proj is None or imgname not in self.imgtrans_proj.pages:
-            return
-        page_index = self.imgtrans_proj.pagename2idx(imgname)
-        if self._current_run_page_indices is not None and page_index not in self._current_run_page_indices:
-            LOGGER.info(f'[ocr_trans_done] 忽略殘留 signal imgname={imgname!r}（本次批次={self._current_run_page_indices}）')
-            return
-        blk_list = self.imgtrans_proj.pages[imgname]
-        if not blk_list:
-            return
-
-        override_fnt_size = pcfg.let_fntsize_flag == 1
-        if override_fnt_size:
-            return  # 使用者強制覆蓋字型大小，不需要 render 計算
-
+    def _apply_color_stroke_and_fontcalc(self, imgname: str, blk_list):
+        """補做顏色/stroke + 字體 render + 警告（FONT_WARN / DET_WARN / BOX_OOB）。
+        舊路與新路（_run_font_calc_for_page）共用。"""
         # 補做顏色 + stroke 設定（on_pagtrans_finished 可能還沒跑，或顏色被 _prepare_imgtrans_run 清掉）
+        # PR4b 註解：此段是 D3 + E3 的配對兜底。動其一必動其二。
+        #   配對 D3 (_prepare_imgtrans_run)：D3 清 srgb 為 (0,0,0) 保留 frgb（偵測值）。下方
+        #     `if blk.fontformat.srgb == [0, 0, 0]` 對應還原。
+        #     frgb 兜底檢查 == [0,0,0] 還原為 gf.frgb。
+        #     目的：避免 OCR 偵測失敗 / 未跑偵測時 fg 預設為 [0,0,0] 導致最終渲染全黑字。
+        #     已知限制：真實黑字漫畫的 frgb=[0,0,0]（正確值）也會被誤改成 gf 預設色，
+        #     這是 historical trade-off，沒有完美解法。
+        #   配對 E3 (on_pagtrans_finished L1213-1214)：E3 在「顏色未還原」狀態算 stroke 可能有誤；
+        #     下方 `if stroke_width == 0: recalulate_stroke_width()` 在顏色還原後重算兜底。
+        #   歷史：project_autosave_stroke_fix.md Bug 1（黑字）+「顏色順序」修法。
         override_fnt_color = pcfg.let_fntcolor_flag == 1
         override_fnt_stroke = pcfg.let_fntstroke_flag == 1
         override_fnt_scolor = pcfg.let_fnt_scolor_flag == 1
@@ -1322,17 +1308,28 @@ class MainWindow(mainwindow_cls):
             # 先還原顏色（必須在 recalulate_stroke_width 之前，stroke 依賴正確的 fg/bg 色）
             if override_fnt_color:
                 blk.set_font_colors(fg_colors=gf.frgb)
-            elif blk.fontformat.frgb == [0, 0, 0]:
+            elif list(blk.fontformat.frgb) == [0, 0, 0]:
                 blk.set_font_colors(fg_colors=gf.frgb)
             if override_fnt_scolor:
                 blk.set_font_colors(bg_colors=gf.srgb)
-            elif blk.fontformat.srgb == [0, 0, 0]:
+            elif list(blk.fontformat.srgb) == [0, 0, 0]:
                 blk.set_font_colors(bg_colors=gf.srgb)
             # 顏色正確後再計算 stroke
+            # PR5b：stroke 改無條件算（取代 PR4b 之前的「if stroke_width == 0」兜底）。
+            # 原本「兜底」是配對 E3 在顏色未還原狀態算出的錯誤值，sw>0 時不觸發保留錯誤。
+            # E3 已從 on_pagtrans_finished 移除 → 此處顏色已還原，直接無條件算 = 唯一正確路徑。
             if override_fnt_stroke:
                 blk.stroke_width = gf.stroke_width
-            elif blk.fontformat.stroke_width == 0:
+            elif pcfg.module.enable_ocr:
                 blk.recalulate_stroke_width()
+
+            # PR5b：E5 補正（從 on_pagtrans_finished 搬來）。
+            # 順序在 stroke 之後、calc_font_size_by_render 之前，sw 已是顏色還原後的正確值。
+            # 條件用 pcfg.module.enable_*（同 PR5a A4c/A5 原則）；lifecycle.expects_stage 在舊路下為 False
+            # 會破壞雙路共用 helper。PR6 砍 flag 時統一改 expects_stage。
+            sw = blk.stroke_width
+            if sw > 0 and pcfg.module.enable_ocr and pcfg.module.enable_detect and pcfg.let_fntsize_flag != 1:
+                blk.font_size = blk.font_size / (1 + sw)
 
         _batch_current = self._gui_batch_current if self._gui_batch_running else None
 
@@ -1349,11 +1346,14 @@ class MainWindow(mainwindow_cls):
             _img_h = 0.0
             _img_w = 0.0
 
-        for blk in blk_list:
-            if blk.translation and blk.translation.strip() not in ('', '●●●'):
-                blk.font_size = calc_font_size_by_render(blk, scale=_scale,
-                                                          img_h=_img_h,
-                                                          char_scale_table=_char_scale_table)
+        # PR5b：override_fnt_size=True 時跳過 calc_font_size_by_render（font_size 由 on_pagtrans_finished 設為 gf.font_size）。
+        # 上方顏色 + stroke + E5 仍跑（修正「override_fnt_size + 顏色未還原」latent bug）。
+        if pcfg.let_fntsize_flag != 1:
+            for blk in blk_list:
+                if blk.translation and blk.translation.strip() not in ('', '●●●'):
+                    blk.font_size = calc_font_size_by_render(blk, scale=_scale,
+                                                              img_h=_img_h,
+                                                              char_scale_table=_char_scale_table)
 
         # 字體過小警告（基於最終渲染結果）
         from modules.ocr.ocr_llm import OcrEventType
@@ -1398,7 +1398,7 @@ class MainWindow(mainwindow_cls):
                 warn_count += 1
             elif cond1 or cond2:
                 if _ocr_ref is not None:
-                    _ocr_ref.logger.warning(f"[{imgname}] 字型疑似過小(單條���) {' '.join(reason)} 譯文：{blk.translation!r}")
+                    _ocr_ref.logger.warning(f"[{imgname}] 字型疑似過小(單條件) {' '.join(reason)} 譯文：{blk.translation!r}")
                 det_warn_count += 1
 
         if warn_count > 0:
@@ -1422,10 +1422,27 @@ class MainWindow(mainwindow_cls):
             if oob_count > 0:
                 self._on_batch_ocr_event(OcrEventType.BOX_OOB, imgname, oob_count, _batch_current)
 
-        # 字體算好後更新 UI 並存 result 圖（與舊版 on_pagtrans_finished 邏輯一致）
-        page_index = self.imgtrans_proj.pagename2idx(imgname)
-        if page_index < 0:
-            return
+    def _refresh_canvas_and_save(self, imgname: str, page_index: int, blk_list) -> str:
+        """UI 刷新 + save 圖。舊路與新路（_refresh_ui_for_page）共用。
+        純圖頁走「直接寫 inpainted_array」分支（繞開 saveCurrentPage，避免 scene 殘留別頁文字）。
+        回傳 save_path（純圖頁可能為 None）。"""
+        if not blk_list:
+            # 純圖頁
+            inpainted = self.imgtrans_proj.load_inpainted_by_imgname(imgname)
+            if inpainted is None:
+                inpainted = self.imgtrans_proj.read_img(imgname)
+            if inpainted is None:
+                return None
+            save_path = self.imgtrans_proj.get_result_path(imgname)
+            qimg = ndarray2pixmap(inpainted, return_qimg=True)
+            self.imsave_thread.saveImg(save_path, qimg, imgname,
+                                        save_params={'ext': pcfg.imgsave_ext, 'quality': pcfg.imgsave_quality})
+            return save_path
+
+        if not pcfg.module.enable_detect and pcfg.module.enable_translate:
+            for blkitem in self.st_manager.textblk_item_list:
+                blkitem.squeezeBoundingRect()
+
         self.imgtrans_proj.set_current_img_byidx(page_index)
         self.canvas.updateCanvas()
         self.st_manager.updateSceneTextitems()
@@ -1433,6 +1450,41 @@ class MainWindow(mainwindow_cls):
         self.pageList.setCurrentRow(page_index)
         self.pageList.blockSignals(False)
         self.saveCurrentPage(False, False)
+        return self.imgtrans_proj.get_result_path(imgname)
+
+    def _run_font_calc_for_page(self, imgname: str):
+        """PR3 + PR5b：新路 FONT_CALC stage runner（主執行緒）。
+        empty blk → noop mark；override_fnt_size 仍呼叫 _apply 跑顏色/stroke/E5（內部守衛 calc 段跳過）。
+        """
+        from .page_lifecycle import PageStage as _PS
+        lifecycle = self.module_manager.imgtrans_thread.lifecycle
+        if self.imgtrans_proj is None or imgname not in self.imgtrans_proj.pages:
+            lifecycle.mark_done(imgname, _PS.FONT_CALCULATED, payload={'font_sizes': {}})
+            return
+        blk_list = self.imgtrans_proj.pages[imgname]
+        if not blk_list:
+            lifecycle.mark_done(imgname, _PS.FONT_CALCULATED, payload={'font_sizes': {}})
+            return
+        # PR5b：override_fnt_size 不再 early return，仍跑 _apply（修正「override_fnt_size + enable_ocr=True
+        # 顏色未還原」latent bug）。_apply 內 calc 段有 override_fnt_size 守衛跳過 render。
+        self._apply_color_stroke_and_fontcalc(imgname, blk_list)
+        font_sizes = {i: float(blk.font_size) for i, blk in enumerate(blk_list)}
+        lifecycle.mark_done(imgname, _PS.FONT_CALCULATED, payload={'font_sizes': font_sizes})
+
+    def _refresh_ui_for_page(self, imgname: str):
+        """PR3：新路 DONE stage runner（主執行緒）。UI 刷新 + save 圖 → mark DONE。"""
+        from .page_lifecycle import PageStage as _PS
+        lifecycle = self.module_manager.imgtrans_thread.lifecycle
+        if self.imgtrans_proj is None:
+            lifecycle.mark_done(imgname, _PS.DONE, payload={'save_path': None})
+            return
+        page_index = self.imgtrans_proj.pagename2idx(imgname)
+        if page_index < 0:
+            lifecycle.mark_done(imgname, _PS.DONE, payload={'save_path': None})
+            return
+        blk_list = self.imgtrans_proj.pages.get(imgname, [])
+        save_path = self._refresh_canvas_and_save(imgname, page_index, blk_list)
+        lifecycle.mark_done(imgname, _PS.DONE, payload={'save_path': save_path})
 
     def on_savestate_changed(self, unsaved: bool):
         save_state = self.tr('unsaved') if unsaved else self.tr('saved')
@@ -1523,7 +1575,6 @@ class MainWindow(mainwindow_cls):
             self.leftBar.set_schedule_active(active)
 
     def on_stop_imgtrans(self):
-        self._current_run_page_indices = None
         flush_run_log('stopped')
         if self._gui_batch_running:
             LOGGER.info('使用者手動中止了批量翻譯佇列')

@@ -1,3 +1,14 @@
+"""
+headless 專屬 fork（非 GUI 共用檔）：複製自 modules/ocr/ocr_llm.py，只給 headless 翻譯 pipeline 用，
+不動 GUI 版本（modules/ocr/ocr_llm.py 保持原樣、GUI 行為零影響）。
+
+跟原版的差異：新增 Plan A2（依錯誤類型分流的全頁備援）：
+  - Plan A（主模型全頁）失敗 → 依失敗原因分流：
+      安全過濾擋住 → safety_model 全頁重試一次（Plan A2-safety）
+      其他（逾時/伺服器忙碌/格式異常等） → timeout_fallback_model 全頁重試一次（Plan A2-timeout）
+  - Plan A2 也失敗 → 照舊落回 Plan B（主模型切片）→ Plan C（fallback_model，最終備援，預設 grok）
+見 F:\\Vs\\Ichaival\\docs\\翻譯器待辦04_模型fallback策略與卡住診斷.md。
+"""
 import os
 import math
 import numpy as np
@@ -13,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from qtpy.QtCore import Signal, QObject
 
-from .base import register_OCR, OCRBase, TextBlock
+from modules.ocr.base import register_OCR, OCRBase, TextBlock
 from utils.textblock import resolve_blk_style
 
 
@@ -156,8 +167,8 @@ class OpenAICompatClient:
 
 
 # ── 主模組 ────────────────────────────────────────────────────
-@register_OCR('llm_ocr')
-class OCRLlm(OCRBase):
+@register_OCR('llm_ocr_headless')
+class OCRLlmHeadless(OCRBase):
     _MODEL_OPTIONS = [
         'gemini-flash-latest',
         'gemini-flash-lite-latest',
@@ -216,6 +227,26 @@ class OCRLlm(OCRBase):
         'fallback_thinking_level': {'type': 'checkbox', 'value': False,
                             'description': '備援模型 Gemma 4 開啟思考模式（勾選=high，不勾=不啟用）',
                             'controlled_by': 'fallback_model',
+                            'visible_for_models': ['gemma-4']},
+        'timeout_fallback_model': {
+            'type': 'selector',
+            'options': _MODEL_OPTIONS,
+            'value': 'gemini-3-flash-preview',
+            'description': '逾時/伺服器忙碌專用備援模型（Plan A2：主模型全頁失敗且非安全過濾擋住時使用；空 = 不使用）'
+        },
+        'timeout_fallback_thinking_budget': {'value': '1024',
+                            'description': '逾時備援模型 Gemini 2.5 思考模式 token 上限',
+                            'controlled_by': 'timeout_fallback_model',
+                            'visible_for_models': ['gemini-2.5']},
+        'timeout_fallback_thinking_level_gemini3': {'type': 'selector',
+                            'options': ['minimal', 'low', 'medium', 'high'],
+                            'value': 'medium',
+                            'description': '逾時備援模型 Gemini 3.x 思考深度',
+                            'controlled_by': 'timeout_fallback_model',
+                            'visible_for_models': ['gemini-3', 'gemini-flash-latest']},
+        'timeout_fallback_thinking_level': {'type': 'checkbox', 'value': False,
+                            'description': '逾時備援模型 Gemma 4 開啟思考模式',
+                            'controlled_by': 'timeout_fallback_model',
                             'visible_for_models': ['gemma-4']},
         'safety_model': {
             'type': 'selector',
@@ -392,6 +423,21 @@ class OCRLlm(OCRBase):
         try: return str(self.params['fallback_thinking_level_gemini3']['value'])
         except: return 'medium'
     @property
+    def timeout_fallback_model(self) -> str: return self.params['timeout_fallback_model']['value']
+    @property
+    def timeout_fallback_thinking_budget(self) -> int:
+        try: return int(self.params['timeout_fallback_thinking_budget']['value'])
+        except: return 0
+    @property
+    def timeout_fallback_thinking_level(self) -> bool:
+        v = self.params.get('timeout_fallback_thinking_level', {}).get('value', False)
+        if isinstance(v, bool): return v
+        return str(v).lower().strip() == 'true'
+    @property
+    def timeout_fallback_thinking_level_gemini3(self) -> str:
+        try: return str(self.params['timeout_fallback_thinking_level_gemini3']['value'])
+        except: return 'medium'
+    @property
     def safety_model(self) -> str:      return self.params['safety_model']['value']
     @property
     def safety_thinking_budget(self) -> int:
@@ -437,6 +483,17 @@ class OCRLlm(OCRBase):
                                 thinking_level=self.fallback_thinking_level,
                                 thinking_level_gemini3=self.fallback_thinking_level_gemini3)
         return OpenAICompatClient(api_key=key, model=self.fallback_model, base_url=self._xai_base_url())
+
+    def _build_timeout_fallback_client(self):
+        if not self.timeout_fallback_model: return None
+        key = self._api_key_for(self.timeout_fallback_model)
+        if not key: return None
+        if self._is_gemini(self.timeout_fallback_model):
+            return GeminiClient(api_key=key, model=self.timeout_fallback_model,
+                                thinking_budget=self.timeout_fallback_thinking_budget,
+                                thinking_level=self.timeout_fallback_thinking_level,
+                                thinking_level_gemini3=self.timeout_fallback_thinking_level_gemini3)
+        return OpenAICompatClient(api_key=key, model=self.timeout_fallback_model, base_url=self._xai_base_url())
 
     def _build_safety_client(self):
         if not self.safety_model: return None
@@ -1232,6 +1289,21 @@ class OCRLlm(OCRBase):
                     resolve_blk_style(blk)
                 return
             self.logger.warning(f"{lp} Plan A：{result}")
+
+            # Plan A2：依錯誤類型分流的全頁備援（安全過濾→safety_model；其他→timeout_fallback_model）
+            is_safety = (result == '安全過濾器擋住')
+            a2_label = 'safety_model' if is_safety else 'timeout_fallback_model'
+            a2_client = self._build_safety_client() if is_safety else self._build_timeout_fallback_client()
+            if a2_client is not None:
+                self.logger.info(f"{lp} Plan A2（{a2_label}）...")
+                result_a2, matched_a2 = self._run_fullpage_impl(img, sorted_blks, client=a2_client)
+                if result_a2 == 'ok':
+                    self._emit(OcrEventType.GROK_OK, snap_imgname)
+                    self.logger.success(f"{lp} Plan A2 成功（{a2_label}，{matched_a2}/{len(blk_list)} 框）")
+                    for blk in blk_list:
+                        resolve_blk_style(blk)
+                    return
+                self.logger.warning(f"{lp} Plan A2（{a2_label}）：{result_a2}")
 
         # Plan B：切片（含切片層級的 Grok 備援）
         result, ok, fail, failed_indices = self._run_slice_plan(
