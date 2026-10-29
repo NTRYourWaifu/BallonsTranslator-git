@@ -53,7 +53,7 @@ def main():
         _emit({'type': 'error', 'msg': f'載入模組失敗: {type(e).__name__}: {e}'})
         sys.exit(1)
 
-    sys.path.insert(0, r'F:\Vs\VideoServ')
+    sys.path.insert(0, r'F:\Vs\Ichaival\VideoServ')
     from mangaserv import zipid
     orig_id = zipid.read_id(args.trans) or zipid.read_id(args.orig)
 

@@ -12,7 +12,7 @@ import time
 import sqlite3
 
 # VideoServ 的 reading_time.sqlite（與 video_server.py 同目錄）
-_RT_DB = r'F:\Vs\VideoServ\reading_time.sqlite'
+_RT_DB = r'F:\Vs\Ichaival\VideoServ\reading_time.sqlite'
 
 
 def _count_chars(s: str) -> int:

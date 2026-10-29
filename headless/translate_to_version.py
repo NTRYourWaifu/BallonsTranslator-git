@@ -56,7 +56,7 @@ def main():
         sys.exit(1)
 
     # 讀原 uuid
-    sys.path.insert(0, r'F:\Vs\VideoServ')
+    sys.path.insert(0, r'F:\Vs\Ichaival\VideoServ')
     from mangaserv import zipid
     orig_id = zipid.read_id(args.src)
 

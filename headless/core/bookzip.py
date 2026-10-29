@@ -19,7 +19,7 @@ import tempfile
 import json
 
 # 引入 MangaServ 的 zipid（寫回永久 id）
-_MANGASERV = r'F:\Vs\VideoServ'
+_MANGASERV = r'F:\Vs\Ichaival\VideoServ'
 if _MANGASERV not in sys.path:
     sys.path.insert(0, _MANGASERV)
 
