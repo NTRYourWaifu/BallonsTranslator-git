@@ -116,6 +116,39 @@ def calc_font_size_by_render(blk: TextBlock, scale: float = 1.0,
     return result_px
 
 
+# 量到的墨水大小 → 中文字級：方塊字的筆畫大約佔字身 0.88
+GLYPH_TO_EM = 0.88
+
+
+def src_glyph_caps(blk_list: list) -> dict:
+    """「字級跟原文」：每個框的字級上限（px），{id(blk): 上限}。
+
+    照 MangaTranslator v1.25.0（commit 5439b80）：整頁先取「普通對白字大小」＝各框量到的字大小的加權中位數
+    （權重＝量到的塊數，最多算 10；整頁不到 10 塊就當量不到）。框自己量到 3 塊以上就用自己的
+    （大喊、小聲才分得出來），但夾在整頁值的 0.6～2.5 倍；不夠就用整頁值。
+    """
+    meas = [(b.obs.src_glyph_px, min(b.obs.src_glyph_n, 10)) for b in blk_list
+            if getattr(b.obs, 'src_glyph_px', -1) > 0 and b.obs.src_glyph_n > 0]
+    page = None
+    if sum(w for _, w in meas) >= 10:
+        meas.sort()
+        half, acc = sum(w for _, w in meas) / 2, 0
+        for v, w in meas:
+            acc += w
+            if acc >= half:
+                page = v
+                break
+    caps = {}
+    for b in blk_list:
+        g = b.obs.src_glyph_px if getattr(b.obs, 'src_glyph_n', 0) >= 3 else None
+        if g is not None and page is not None:
+            g = min(max(g, page * 0.6), page * 2.5)
+        g = g or page
+        if g:
+            caps[id(b)] = g / GLYPH_TO_EM
+    return caps
+
+
 class TextBlkItem(QGraphicsTextItem):
 
     begin_edit = Signal(int)

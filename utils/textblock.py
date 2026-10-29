@@ -79,7 +79,11 @@ class RawObservations:
     ocr_src_text: str = ''            # OCR 識別出的原文完整字串
     ocr_says_vertical: bool = None    # LLM 回傳的 direction 欄位判斷
     ocr_is_handwritten: bool = False  # LLM 回傳的 is_handwritten 欄位
-    ocr_font_size_px: float = -1.0   # LLM 回傳的字符視覺像素高度
+    ocr_font_size_px: float = -1.0   # LLM 回傳的字符視覺像素高度（不準，別拿來當原文字級）
+
+    # ── 偵測後量原文字級（textdetector/base.py::measure_src_glyph）──
+    src_glyph_px: float = -1.0        # 框內墨水連通塊的字大小（第 90 百分位，px）
+    src_glyph_n: int = 0              # 量到幾塊；太少就不可信
 
 @nested_dataclass
 class TextBlock:

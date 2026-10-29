@@ -1349,11 +1349,18 @@ class MainWindow(mainwindow_cls):
         # PR5b：override_fnt_size=True 時跳過 calc_font_size_by_render（font_size 由 on_pagtrans_finished 設為 gf.font_size）。
         # 上方顏色 + stroke + E5 仍跑（修正「override_fnt_size + 顏色未還原」latent bug）。
         if pcfg.let_fntsize_flag != 1:
+            # 字級跟原文：塞滿框的字級只當上限，再跟原文量到的字大小取小的（ui/textitem.py::src_glyph_caps）
+            _caps = {}
+            if _ocr is not None and getattr(_ocr, 'follow_src_glyph', False):
+                from ui.textitem import src_glyph_caps
+                _caps = src_glyph_caps(blk_list)
             for blk in blk_list:
                 if blk.translation and blk.translation.strip() not in ('', '●●●'):
                     blk.font_size = calc_font_size_by_render(blk, scale=_scale,
                                                               img_h=_img_h,
                                                               char_scale_table=_char_scale_table)
+                    if id(blk) in _caps:
+                        blk.font_size = min(blk.font_size, _caps[id(blk)])
 
         # 字體過小警告（基於最終渲染結果）
         from modules.ocr.ocr_llm import OcrEventType

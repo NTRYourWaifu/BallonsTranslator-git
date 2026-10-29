@@ -240,6 +240,7 @@ class OCRLlm(OCRBase):
         'delay':         {'value': '0.0', 'description': '請求間隔（付費版可設為 0）'},
         'max_workers':   {'value': '5', 'description': '切片模式並行數（建議 5~10）'},
         'font_size_scale': {'value': '1.0', 'description': '字體大小縮放（0.5 縮小一半；1.0 不縮放；1.2 放大 20%）'},
+        '字級跟原文': {'type': 'checkbox', 'value': False},
         'char_scale_table': {'value': '3:0.04:0.40, 6:0.06:0.45, 12:0.08:0.50, 22:0.10:0.55', 'description': '字數縮放表：「字數:佔比閾值:縮放係數」用逗號分隔。字數落在對應段時，佔比超過該段閾值才縮，縮放係數直接乘在原字體上'},
         'handwritten_size_ratio': {'value': '1.5', 'description': '手寫字：實際渲染大小與 LLM 估算大小的比值超過此倍數（過大）或低於此倍數的倒數（過小）才警告（預設 1.5）'},
         'save_grid_debug': {'type': 'checkbox', 'value': False,
@@ -327,6 +328,10 @@ class OCRLlm(OCRBase):
     def font_size_scale(self) -> float:
         try: return float(self.params['font_size_scale']['value'])
         except: return 1.0
+    @property
+    def follow_src_glyph(self) -> bool:
+        v = self.params.get('字級跟原文', {}).get('value', False)
+        return v if isinstance(v, bool) else str(v).lower() == 'true'
     @property
     def char_scale_table(self) -> list:
         """解析 '3:0.04:0.40, 6:0.06:0.45' → [(3,0.04,0.40),(6,0.06,0.45),...]"""
