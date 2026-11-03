@@ -457,7 +457,21 @@ class Canvas(QGraphicsScene):
             self.scalefactor_changed.emit()
         self.setSceneRect(0, 0, self.baseLayer.sceneBoundingRect().width(), self.baseLayer.sceneBoundingRect().height())
 
+    def fitToView(self):
+        """整張圖縮到剛好塞進畫布（不看捲軸，貼齊後捲軸會消失）。"""
+        if not self.gv.isVisible() or self.base_pixmap is None:
+            return
+        vp = self.gv.maximumViewportSize()
+        im = self.baseLayer.rect()
+        if im.width() <= 0 or im.height() <= 0 or vp.width() <= 0 or vp.height() <= 0:
+            return
+        target = min((vp.width() - 2) / im.width(), (vp.height() - 2) / im.height())
+        if abs(target - self.scale_factor) > 1e-4:
+            self.scaleImage(target / self.scale_factor)
+
     def onViewResized(self):
+        if pcfg.imgtrans_fit_window:
+            self.fitToView()
         gv_w, gv_h = self.gv.geometry().width(), self.gv.geometry().height()
 
         x = gv_w - self.scaleFactorLabel.width()
@@ -760,6 +774,8 @@ class Canvas(QGraphicsScene):
             if im_rect != self.sceneRect():
                 self.setSceneRect(0, 0, im_rect.width(), im_rect.height())
             self.scaleImage(1)
+            if pcfg.imgtrans_fit_window:
+                self.fitToView()
 
         self.setDrawingLayer()
 

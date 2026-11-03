@@ -725,6 +725,7 @@ class BottomBar(Widget):
     textedit_checkchanged = Signal()
     paintmode_checkchanged = Signal()
     textblock_checkchanged = Signal()
+    fit_checkchanged = Signal()
     inpaint_btn_clicked = Signal()
 
     def __init__(self, mainwindow: QMainWindow, *args, **kwargs) -> None:
@@ -754,7 +755,11 @@ class BottomBar(Widget):
         self.textblockChecker = QCheckBox()
         self.textblockChecker.setObjectName('TextblockChecker')
         self.textblockChecker.clicked.connect(self.onTextblockCheckerClicked)
-        
+        self.fitChecker = QCheckBox()
+        self.fitChecker.setObjectName('FitChecker')
+        self.fitChecker.setToolTip('自動貼齊視窗')
+        self.fitChecker.clicked.connect(self.onFitCheckerClicked)
+
         self.originalSlider = PaintQSlider(self.tr("Original image opacity"), Qt.Orientation.Horizontal, self)
         self.originalSlider.setFixedWidth(150)
         self.originalSlider.setRange(0, 100)
@@ -775,6 +780,7 @@ class BottomBar(Widget):
         self.hlayout.addWidget(self.paintChecker)
         self.hlayout.addWidget(self.texteditChecker)
         self.hlayout.addWidget(self.textblockChecker)
+        self.hlayout.addWidget(self.fitChecker)
         self.hlayout.setContentsMargins(60, 0, 10, WINDOW_BORDER_WIDTH)
 
 
@@ -794,6 +800,10 @@ class BottomBar(Widget):
 
     def onTextblockCheckerClicked(self):
         self.textblock_checkchanged.emit()
+
+    def onFitCheckerClicked(self):
+        pcfg.imgtrans_fit_window = self.fitChecker.isChecked()
+        self.fit_checkchanged.emit()
 
     def inpaintBtnClicked(self):
         self.inpaint_btn_clicked.emit()

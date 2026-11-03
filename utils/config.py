@@ -70,6 +70,7 @@ class ProgramConfig(Config):
     imgtrans_paintmode: bool = False
     imgtrans_textedit: bool = True
     imgtrans_textblock: bool = True
+    imgtrans_fit_window: bool = False   # 右下角「自動貼齊」：換頁、縮放視窗時把整張圖縮到剛好塞進畫布
     mask_transparency: float = 0.
     original_transparency: float = 0.
     open_recent_on_startup: bool = True 

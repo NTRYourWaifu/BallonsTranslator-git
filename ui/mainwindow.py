@@ -251,6 +251,7 @@ class MainWindow(mainwindow_cls):
         self.bottomBar.textedit_checkchanged.connect(self.setTextEditMode)
         self.bottomBar.paintmode_checkchanged.connect(self.setPaintMode)
         self.bottomBar.textblock_checkchanged.connect(self.setTextBlockMode)
+        self.bottomBar.fit_checkchanged.connect(self.onFitWindowChanged)
 
         mainHLayout = QHBoxLayout()
         mainHLayout.addWidget(self.leftBar)
@@ -339,6 +340,7 @@ class MainWindow(mainwindow_cls):
     def setupConfig(self):
 
         self.bottomBar.originalSlider.setValue(int(pcfg.original_transparency * 100))
+        self.bottomBar.fitChecker.setChecked(pcfg.imgtrans_fit_window)
         self.drawingPanel.maskTransperancySlider.setValue(int(pcfg.mask_transparency * 100))
         self.leftBar.initRecentProjMenu(pcfg.recent_proj_list)
         self.leftBar.save_config.connect(self.save_config)
@@ -890,6 +892,10 @@ class MainWindow(mainwindow_cls):
         self.canvas.setTextBlockMode(mode)
         pcfg.imgtrans_textblock = mode
         self.st_manager.showTextblkItemRect(mode)
+
+    def onFitWindowChanged(self):
+        if pcfg.imgtrans_fit_window:
+            self.canvas.fitToView()
 
     def save_proj(self):
         if self.leftBar.imgTransChecker.isChecked()\
