@@ -5,7 +5,8 @@ Koharu Layout RF-DETR 要 transformers ≥5.1，BT 的嵌入式 Python 裝不進
 做法照 BT-headless/tools/newmask/gen_masks.py：頁面縮到長邊 2048 再丟模型；
 文字遮罩＝每個 text／擬聲詞實例框跑 comic-text-mask，再跟外擴 1% 的實例遮罩取交集。
 
-stdin 一行一個 JSON：{"img": 圖檔, "mask_out": 遮罩 PNG 輸出路徑}
+stdin 一行一個 JSON：{"img": 圖檔, "mask_out": 遮罩 PNG 輸出路徑[, "boxes": [[x1,y1,x2,y2], ...]]}
+  帶 boxes＝只描筆畫：不跑 RF-DETR，每個框跑 comic-text-mask，跟外擴 1% 短邊的框取交集（給 lordtrilink 用）。
 stdout 一行一個 JSON：ready → 每頁 result／error
 """
 import importlib.util, json, os, sys, time, warnings
@@ -73,6 +74,17 @@ def main():
             pil = Image.open(req['img']).convert('RGB')
             rgb = np.asarray(pil)
             h, w = rgb.shape[:2]
+            if req.get('boxes') is not None:
+                combo = np.zeros((h, w), np.uint8)
+                kd = max(3, int(min(h, w) * .01))
+                for b in req['boxes']:
+                    x1, y1, x2, y2 = (int(v) for v in b)
+                    region = np.zeros((h, w), np.uint8)
+                    region[max(0, y1 - kd):y2 + kd, max(0, x1 - kd):x2 + kd] = 255
+                    combo |= ctm_mask(rgb, b) & region
+                cv2.imencode('.png', combo)[1].tofile(req['mask_out'])
+                emit(type='result', inst=[])
+                continue
             sc = min(1., 2048 / max(h, w))
             small = pil.resize((round(w * sc), round(h * sc)), Image.BILINEAR) if sc < 1 else pil
             det = model.predict(small, threshold=0.20, shape=(1152, 1152), include_source_image=False)

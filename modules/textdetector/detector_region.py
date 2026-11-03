@@ -6,6 +6,7 @@
   lordtrilink lordtrilink/manga-text-detector-v0（YOLO11s，Manga109-s 整句標註，text-region／sfx），本程序直接跑。
 選項
   用泡泡分組   同一顆泡泡裡的多個文字塊併成一框（只有 RF-DETR 有泡泡）。
+  新描筆畫     lordtrilink 的框改用 comic-text-mask 描筆畫（借 RF-DETR 那個子程序，但不跑 RF-DETR）；關著是舊的 canny_flood。
   補沒泡泡的字 跑原本的 YOLO 一行一框＋合併（吃 yolov8 的設定，不開 CTD），主模型沒蓋到的框補進來。
   保留擬聲詞   擬聲詞也出框，交給認字判要不要翻；關掉就連遮罩一起拿掉。跟文字框重疊的擬聲詞框一律丟掉。
   補CTD       再跑 CTD，前面都沒蓋到的框補進來（彩色 CG 寫在身上的字主模型會漏；CTD 會框大框，預設關）。
@@ -75,13 +76,17 @@ class _RFWorker:
             if line.startswith('{'):
                 return json.loads(line)
 
-    def run(self, img_bgr: np.ndarray) -> Tuple[list, np.ndarray]:
+    def run(self, img_bgr: np.ndarray, boxes: list = None) -> Tuple[list, np.ndarray]:
+        """boxes 給了就只在這些框裡描筆畫（不跑 RF-DETR）。"""
         with self.lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
             src, out = osp.join(self.tmp, 'page.png'), osp.join(self.tmp, 'mask.png')
             cv2.imencode('.png', img_bgr)[1].tofile(src)
-            self.proc.stdin.write(json.dumps({'img': src, 'mask_out': out}) + '\n')
+            req = {'img': src, 'mask_out': out}
+            if boxes is not None:
+                req['boxes'] = [[int(v) for v in b] for b in boxes]
+            self.proc.stdin.write(json.dumps(req) + '\n')
             self.proc.stdin.flush()
             msg = self._read()
             if msg.get('type') != 'result':
@@ -104,6 +109,7 @@ class DetectorRegion(TextDetectorBase):
     params = {
         '模型': {'type': 'selector', 'options': ['RF-DETR', 'lordtrilink'], 'value': 'RF-DETR'},
         '用泡泡分組': {'type': 'checkbox', 'value': True, 'controlled_by': '模型', 'visible_for_models': ['RF-DETR']},
+        '新描筆畫': {'type': 'checkbox', 'value': False, 'controlled_by': '模型', 'visible_for_models': ['lordtrilink']},
         '補沒泡泡的字': {'type': 'checkbox', 'value': True},
         '保留擬聲詞': {'type': 'checkbox', 'value': True},
         '補CTD': {'type': 'checkbox', 'value': False},
@@ -219,6 +225,10 @@ class DetectorRegion(TextDetectorBase):
             texts = self._group_by_bubble(texts, bubbles)
         sfx = self._dedupe_sfx(texts, sfx)
         boxes = texts + (sfx if self._flag('保留擬聲詞') else [])
+        if rf_mask is None and self._flag('新描筆畫') and boxes:
+            if self._rf is None:
+                self._rf = _RFWorker(self.logger)
+            rf_mask = self._rf.run(img, boxes=[b for b in boxes if _area(b) > 0])[1]
 
         yolo = self._get_yolo()
         yolo_mask, yolo_blks = yolo._run_yolo(img) if yolo.model is not None else (None, [])
