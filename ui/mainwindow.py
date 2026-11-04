@@ -1362,9 +1362,10 @@ class MainWindow(mainwindow_cls):
                 _caps = src_glyph_caps(blk_list)
             for blk in blk_list:
                 if blk.translation and blk.translation.strip() not in ('', '●●●'):
+                    # 量得到原文字級的框不套字數縮放表（字少就硬壓的猜法），改由原文字級當上限（同 BT-headless T-34 預設）
                     blk.font_size = calc_font_size_by_render(blk, scale=_scale,
                                                               img_h=_img_h,
-                                                              char_scale_table=_char_scale_table)
+                                                              char_scale_table=None if id(blk) in _caps else _char_scale_table)
                     if id(blk) in _caps:
                         blk.font_size = min(blk.font_size, _caps[id(blk)])
 
