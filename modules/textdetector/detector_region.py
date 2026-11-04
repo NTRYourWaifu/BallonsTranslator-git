@@ -81,8 +81,8 @@ class _RFWorker:
         with self.lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
-            src, out = osp.join(self.tmp, 'page.png'), osp.join(self.tmp, 'mask.png')
-            cv2.imencode('.png', img_bgr)[1].tofile(src)
+            src, out = osp.join(self.tmp, 'page.npy'), osp.join(self.tmp, 'mask.png')
+            np.save(src, np.ascontiguousarray(img_bgr))   # 直接存陣列：大頁 PNG 壓縮要 0.1 秒以上
             req = {'img': src, 'mask_out': out}
             if boxes is not None:
                 req['boxes'] = [[int(v) for v in b] for b in boxes]
