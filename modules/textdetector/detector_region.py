@@ -6,6 +6,7 @@
   lordtrilink lordtrilink/manga-text-detector-v0（YOLO11s，Manga109-s 整句標註，text-region／sfx），本程序直接跑。
 選項
   lordtrilink補漏 RF-DETR 漏掉的字用 lordtrilink 補：它的框被 RF-DETR 的框蓋不到三成、框裡描得到筆畫（≥ 框面積 2%）就補進來，
+              但把 RF 的台詞框和擬聲詞框併成一塊、或沒帶來 RF 漏掉的字的不收（lt_reject，T-30 規則①），
               筆畫用 comic-text-mask 只描這幾個框（T-30，11-04 實測補進 66 框，彩色 CG 整頁沒框的頁靠它）。
   用泡泡分組   同一顆泡泡裡的多個文字塊併成一框（只有 RF-DETR 有泡泡）。T-30 起預設關：斜對角相連的兩顆泡泡會被併成一框。
   新描筆畫     lordtrilink 的框改用 comic-text-mask 描筆畫（借 RF-DETR 那個子程序，但不跑 RF-DETR）；關著是舊的 canny_flood。
@@ -55,6 +56,8 @@ def _inter(a, b):
 
 INSIDE, LOOSE_FILL, LOOSE_COV = .8, .3, .85
 LT_COVER, LT_STROKE = .3, .02
+# lordtrilink 補漏的擋法（T-30 規則①，11-04，實驗 Ichaival/lab/T30_掃框收尾/rule_n.py）
+LT_RESID, LT_PAD, LT_PAD_PAGE, LT_JOIN = .05, .1, .005, .01
 
 
 def _contains(a, b):
@@ -72,6 +75,41 @@ def _loose(o, inner, mask) -> bool:
     for b in ls:
         k[max(0, b[1] - o[1]):max(0, b[3] - o[1]), max(0, b[0] - o[0]):max(0, b[2] - o[0])] = True
     return (sub & k).sum() >= LOOSE_COV * max(1, sub.sum())
+
+
+def _residual(o, boxes, mask) -> float:
+    """o 框裡的筆畫，被 boxes（各外擴一成＋整頁短邊 0.5%）蓋不到的部分，相鄰的字併成塊後最大一塊佔 o 框筆畫的比例。"""
+    x1, y1, x2, y2 = o
+    sub = mask[y1:y2, x1:x2] > 0
+    n = int(sub.sum())
+    if n == 0:
+        return 0.0
+    pad = int(min(mask.shape[:2]) * LT_PAD_PAGE)
+    k = np.zeros_like(sub)
+    for r in boxes:
+        px, py = int((r[2] - r[0]) * LT_PAD) + pad, int((r[3] - r[1]) * LT_PAD) + pad
+        r = [r[0] - px, r[1] - py, r[2] + px, r[3] + py]
+        if _inter(o, r):
+            k[max(0, r[1] - y1):max(0, r[3] - y1), max(0, r[0] - x1):max(0, r[2] - x1)] = True
+    un = (sub & ~k).astype(np.uint8)
+    if not un.any():
+        return 0.0
+    ks = max(3, int(min(mask.shape[:2]) * LT_JOIN))
+    cnt, lab = cv2.connectedComponents(cv2.dilate(un, np.ones((ks, ks), np.uint8)), connectivity=8)
+    sizes = np.bincount(lab[un > 0].ravel(), minlength=cnt)[1:]
+    return float(sizes.max()) / n if sizes.size else 0.0
+
+
+def lt_reject(cand, rf_items, mask) -> bool:
+    """T-30 規則①：lordtrilink 補漏候選框不收的兩種情況（rf_items＝RF 的 [{'xyxy','sfx'}]，mask＝候選框的筆畫遮罩）：
+      - 同時包著 RF 的文字框和擬聲詞框（各八成在內）＝把台詞和擬聲詞併成一塊
+        （11-04 字級測試 a05 第 157、212 頁：大鬆框收進來把擬聲詞一起消掉、排成超大字，台詞只讀到擬聲詞）；
+      - RF 沒蓋到的筆畫，相鄰字併成塊後最大一塊不到候選框筆畫的 5%＝沒帶來 RF 漏掉的字。
+    RF 只框到一部分（漏了句尾、一欄只框半截）時照收，不然那截字就沒框。"""
+    inside = [it for it in rf_items if _contains(cand, it['xyxy'])]
+    if any(it['sfx'] for it in inside) and any(not it['sfx'] for it in inside):
+        return True
+    return _residual(cand, [it['xyxy'] for it in rf_items], mask) < LT_RESID
 
 
 def clean_overlaps(items: list, mask=None) -> list:
@@ -281,7 +319,7 @@ class DetectorRegion(TextDetectorBase):
             return [], None
         m = self._get_rf().run(img, boxes=[c['xyxy'] for c in cand])[1]
         add = [c for c in cand if np.count_nonzero(m[c['xyxy'][1]:c['xyxy'][3], c['xyxy'][0]:c['xyxy'][2]])
-               >= LT_STROKE * _area(c['xyxy'])]
+               >= LT_STROKE * _area(c['xyxy']) and not lt_reject(c['xyxy'], items, m)]
         return add, m
 
     @staticmethod
